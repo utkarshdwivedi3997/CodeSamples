@@ -7,6 +7,10 @@ IMenuState: Interface for all menu-states in the state machine based menu archit
 
 MenuState_LobbyScreen: The game's lobby screen where players chose their controller layout.
 
+
+
+Portions of the scripts mentioned below were contributed to by my teammates as well.
+
 ---------------------- Systems -----------------------
 MetaManager: The overarching game manager script. Handles data persistence and systems required by all scenes, such as level loading.
 
