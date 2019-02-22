@@ -1,1 +1,10 @@
 Script files from the game I'm currently working on, Fling to the Finish: https://www.splitsidegames.com/fling-to-the-finish.
+
+IMenuState: Interface for all menu-states in the state machine based menu architecture.
+MenuState_LobbyScreen: The game's lobby screen where players chose their controller layout.
+MetaManager: The overarching game manager script. Handles data persistence and systems required by all scenes, such as level loading.
+NetworkManager: The overarching network syncing script. Keeps track of all online systems such as client ID and connectivity status.
+RaceManager: The script that manages all aspects of a race. Exists only in playable scenes (not menus). Handles things such as starting the race, keeping track of player checkpoints, winning, etc.
+PlayerInput: Responsible for reading input from the player and passing it to PlayerMovement.cs and RopeManager.cs. Each player in the team has their own PlayerInput.cs script.
+PlayerMovement: Responsible for handling player gameplay after receiving input from PlayerInput.cs. Each player in the team has their own PlayerMovement.cs script.
+RopeManager: Responsible for common gameplay of the rope that is shared by two players. Each team has one RopeManager.cs script that takes input from both its PlayerInput.cs scripts.
