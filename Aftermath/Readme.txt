@@ -1,1 +1,0 @@
-Samples from a group project I worked on as the sole programmer for about 7 weeks.
