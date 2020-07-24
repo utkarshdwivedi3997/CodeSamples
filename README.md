@@ -1,6 +1,6 @@
 Code samples from past and present projects I have worked / am working on.
 
-- [Fling to the Finish]("Fling to the Finish (Current Project)"/): The game I'm currently working on.
+- [Fling to the Finish](Fling to the Finish (Current Project)): The game I'm currently working on.
 
 - [A True Ace in Space]("_A True Ace in Space"): Unreal Engine 4 Group Project
 I worked on the player spaceship movement, as well as enemy spaceship AI states.
