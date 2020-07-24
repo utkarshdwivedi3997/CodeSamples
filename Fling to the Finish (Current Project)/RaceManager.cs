@@ -6,29 +6,43 @@ using UnityEngine.EventSystems;
 using Rewired;
 using Fling.Saves;
 using Photon.Pun;
+using System.Linq;      // for sorting team place ranks
+using TMPro;
+using Menus.Settings;
+using Fling.AbilityManagement;
+using Fling.GameModes;
+using UnityEngine.Playables;
+using UnityEngine.Events;
 
-public class RaceManager : MonoBehaviour//PunCallbacks
+public class RaceManager : MonoBehaviourPun//PunCallbacks
 {
     public static RaceManager Instance { get; set; }
 
     #region FIELDS
-    private Transform[] startingCheckpoint;          // Array of starting point for teams
-    private Transform[] currCheckpoint;             // Array of the currently active checkpoints for each team
-    private Transform[] nextCheckpoint;             // Array of the next checkpoint for each team
+    private PlayableDirector preRacePlayableDirector;
 
-    private List<Transform> allCheckpoints;         // LIST of all checkpoints in the level. Unity's arrays don't have an IndexOf() (yeah, wonderful, right?) function and we need that
-                                                    // Technically, we could do System.Array.IndexOf(array, element) but I don't want to import another library for just once line of code
+    private Transform[] startingCheckpoint;             // Array of starting point for teams
+    private List<Transform> currCheckpoint;             // List of the currently active checkpoints for each team
+    private List<Transform> nextCheckpoint;             // List of the next checkpoint for each team
+
+    private List<Transform> allCheckpoints;             // LIST of all checkpoints in the level. Unity's arrays don't have an IndexOf() (yeah, wonderful, right?) function and we need that
+                                                        // Technically, we could do System.Array.IndexOf(array, element) but I don't want to import another library for just once line of code
+    /// <summary>
+    /// Number of checkpoints in the race
+    /// </summary>
+    public int NCheckpoints
+    {
+        get; private set;
+    }
+
     private GameObject winPoint;
+    private List<bool> hasTeamFinishedRace;
+    public int NumberOfTeamsThatHaveFinishedRace { get; private set; }
 
-    public GameObject winPanel, timerPanel, roundStartPanel;
-
-    public Text winnerText, restartText, timerText, winTimerText, bestTimeText;
-    public Text winnerText2, winTimerText2, bestTimeText2;
-
-    public bool useStartTimer = true;
     public bool isAutumnWorld = false;
 
-    public GameObject splitline;
+    [SerializeField] private RaceUIManager raceUI;
+    public RaceUIManager RaceUI { get { return raceUI; } }
 
     //timer stuff
     public float speedUpTime = 5f, slowDownFactor = 0.35f;
@@ -36,41 +50,40 @@ public class RaceManager : MonoBehaviour//PunCallbacks
     private float startTime;
     private string minutes, seconds, milliseconds;
     private bool isRaceOver = true;
+    private bool hasSingleTeamFinishedRace = false;
+    private bool IsRaceUIAnimationOver = false;
+    private bool hasRaceStarted = false;
     private float raceTime = 0f;
+    public float RaceFinishTime { get; private set; }
 
-    private bool teamDying = false;
+    [SerializeField]
+    private float respawnDelayTime = 0.5f;
+    private List<bool> teamDying;
 
-    private int winningTeam = 0, losingTeam = 0;
+    private int winningTeam = -1, losingTeamOnClient = -1;
     private bool isSlowingDown = false, isSpeedingUp = false;
     private bool startCameraResize = false;
 
     public List<List<GameObject>> teamAttachedPlungers;
     // public List<List<GameObject>> TeamAttachedPlungers {get{return teamAttachedPlungers;} set{teamAttachedPlungers = value;}}
 
-    [Header("Place Rank UI (First Place / Second Place etc.)")]
-    private List<int> teamPlaceRanks;                   // Array to keep track of the ranks of each team in the race (first place/second place/etc.)
-    private bool rankSwitchCoroutineRunning;
-    [SerializeField]
-    private GameObject ranksPanel;
-    [SerializeField]
-    private float rankSwitchAnimationSpeed = 0.5f;
-    [SerializeField]
-    private Image firstPlace;
-    [SerializeField]
-    private Image secondPlace;
-    [SerializeField]
-    private Transform team1UILocation;
-    [SerializeField]
-    private Transform team2UILocation;
+    //[Header("--------------------------------------------------------------")]
+    //[Header("Place Rank UI (First Place / Second Place etc.)")]
+    private List<int> indicesOfTeamsStillRacing;
+    private List<int> indicesOfTeamsStillRacingRanked;
+    /// <summary>
+    /// Indices of teams ordered in the order of their place in the race
+    /// </summary>
+    public List<int> TeamIndicesOrderedByRank { get; private set; }
 
-    [Header("Trophies")]
-    [SerializeField]
-    private Animator levelBeatenAnimator;
-    [SerializeField]
-    private Animator silverUnlockedAnimator;
-    [SerializeField]
-    private Animator goldUnlockedAnimator;
-    private bool wasLevelBeatenBefore = false, wasSilverUnlockedBefore = false, wasGoldUnlockedBefore = false;
+    /// <summary>
+    /// Indices of teams ordered in the order of their place after they have finished the race
+    /// </summary>
+    public List<int> FinalTeamIndicesOrderedByRank { get; private set; }
+
+    private List<int> indicesOfTeamsThatQuit;
+
+    private bool rankSwitchCoroutineRunning;
 
     [Header("AudioPlayers")]
     public GenericSoundPlayer fallSoundPlayer;
@@ -94,12 +107,10 @@ public class RaceManager : MonoBehaviour//PunCallbacks
         }
     }
 
-
-    [Header("Tutorial Temp Win Stuff")]
-    [SerializeField]
-    private RectTransform[] tutorialWinObjects;
-    [SerializeField]
-    private Animator tutorialWinAnimator;
+    /// <summary>
+    /// A container for all GameMode scripts
+    /// </summary>
+    public RaceReferences.GameModeContainer GameModes { get; private set; }
 
     private Player systemPlayer; //The Rewired System Player
 
@@ -119,22 +130,21 @@ public class RaceManager : MonoBehaviour//PunCallbacks
     }
 
     // Use this for initialization
-    IEnumerator Start () {
+    IEnumerator Start ()
+    {
         // Get system player
         systemPlayer = ReInput.players.SystemPlayer;
 
         eventSystem = EventSystem.current;
 
-        teamAttachedPlungers = new List<List<GameObject>>();
-        teamAttachedPlungers.Add(new List<GameObject>());
-        teamAttachedPlungers.Add(new List<GameObject>());
+        if (NetworkManager.Instance != null)
+        {
+            OnRaceFinish += NetworkManager.Instance.OnRaceFinishNetworkCleanUp;
+        }
 
-        // Deactivate all UI
-        winPanel.SetActive(false);
-        roundStartPanel.SetActive(false);
-        tutorialWinAnimator.gameObject.SetActive(false);
         isPaused = false;
         hasWon = false;
+        hasRaceStarted = false;
         if (pauseMenuCanvas != null)
         {
             pauseMenuCanvas.SetActive(false);
@@ -144,18 +154,42 @@ public class RaceManager : MonoBehaviour//PunCallbacks
         startingCheckpoint = RaceReferences.Instance.StartingCheckpoints;
         allCheckpoints = new List<Transform>();
         allCheckpoints.AddRange(RaceReferences.Instance.AllCheckpoints);
+        NCheckpoints = allCheckpoints.Count + 1;
         winPoint = RaceReferences.Instance.WinPoint.gameObject;
+        GameModes = RaceReferences.Instance.GameModes;
+        preRacePlayableDirector = RaceReferences.Instance.PreRaceCameraPlayableDirector;
+        if (preRacePlayableDirector != null) preRacePlayableDirector.Stop();
 
-        currCheckpoint = new Transform[startingCheckpoint.Length];
-        nextCheckpoint = new Transform[startingCheckpoint.Length];
+        // Wait until we know the total number of teams
+        while (!TeamManager.Instance.IsNumberOfTeamsSet)
+        {
+            yield return null;
+        }
 
-        teamPlaceRanks = new List<int>(new int[TeamManager.Instance.TeamsOnThisClient]);
+        int totalTeams = TeamManager.Instance.TotalNumberOfTeams;
+
+        currCheckpoint = new List<Transform>(new Transform[totalTeams]);        // new Transform[startingCheckpoint.Length];
+        nextCheckpoint = new List<Transform>(new Transform[totalTeams]);        // new Transform[startingCheckpoint.Length];
+
+        //teamPlaceRanks = new List<int>(new int[totalTeams]);            // can't initialize a list with a specific size, so we have to convert an array to a list
+        TeamIndicesOrderedByRank = new List<int>(new int[totalTeams]);  // can't initialize a list with a specific size, so we have to convert an array to a list
+        indicesOfTeamsStillRacing = new List<int>(new int[totalTeams]);
+        for (int i = 0; i < indicesOfTeamsStillRacing.Count; i++)
+        {
+            indicesOfTeamsStillRacing[i] = i;
+        }
+        indicesOfTeamsStillRacingRanked = new List<int>(indicesOfTeamsStillRacing);
+
+        teamAttachedPlungers = new List<List<GameObject>>();            // Team attached plungers
 
         // Set current checkpoints for each team to their respective starting points
-        for (int i = 0; i < startingCheckpoint.Length; i++)
+        for (int i = 0; i < totalTeams /*startingCheckpoint.Length*/; i++)
         {
-            currCheckpoint[i] = startingCheckpoint[i];
+            currCheckpoint[i] = startingCheckpoint[i % 2];
             nextCheckpoint[i] = allCheckpoints[0];
+
+            // Add a list of attached plungers for each team
+            teamAttachedPlungers.Add(new List<GameObject>());
         }
 
         // Instantiate the player characters
@@ -167,103 +201,131 @@ public class RaceManager : MonoBehaviour//PunCallbacks
         else
         {
             yield return WaitForAllClientsToLoad();     // if online mode, wait until everyone has loaded in!
-            //TeamManager.Instance.InstantiatePrefabsNetworked(startingCheckpoint[NetworkManager.Instance.PlayerNumber % 2]);
             TeamManager.Instance.InstantiatePrefabs(startingCheckpoint);
         }
 
-        if(MetaManager.Instance.levelAbilityMode == Fling.Levels.LevelAbilityMode.Anvil) {
-            AbilityManager.Instance.AttachAnvilToAllTeams();
+        teamDying = new List<bool>(new bool[TeamManager.Instance.TotalNumberOfTeams]);
+        for (int i = 0; i < teamDying.Count; i++)
+        {
+            teamDying[i] = false;
         }
-        else if(MetaManager.Instance.levelAbilityMode == Fling.Levels.LevelAbilityMode.SpringRope) {
-            AbilityManager.Instance.GiveSolidRopeToAllTeams();
+
+        hasTeamFinishedRace = new List<bool>(new bool[TeamManager.Instance.TotalNumberOfTeams]);
+        for (int i = 0; i < hasTeamFinishedRace.Count; i++)
+        {
+            hasTeamFinishedRace[i] = false;
         }
-        
+
+        FinalTeamIndicesOrderedByRank = new List<int>();
+        indicesOfTeamsThatQuit = new List<int>();
+        NumberOfTeamsThatHaveFinishedRace = 0;
+
+        if (!PhotonNetwork.OfflineMode)
+        {
+            NetworkManager.Instance.OnTeamsLeftRoom += OnTeamsLeftRoom;
+        }
+
+        systemPlayer.AddInputEventDelegate(SkipPreRaceCutscene, UpdateLoopType.Update, InputActionEventType.ButtonPressed, "SkipCutscene");
+        yield return StartCoroutine(PreRaceSetup());
+        systemPlayer.RemoveInputEventDelegate(SkipPreRaceCutscene);
+
         StartCoroutine(BeginRound());
     }
 
     #region RACE_START
+
+    IEnumerator PreRaceSetup()
+    {
+        if (OnPreRaceSetupStarted != null)
+        {
+            OnPreRaceSetupStarted();
+        }
+
+        bool done = false;
+        if (preRacePlayableDirector != null && MetaManager.Instance)
+        {
+            preRacePlayableDirector.Play();
+
+            preRacePlayableDirector.stopped += (PlayableDirector dir) => done = true;
+        }
+        else
+        {
+            done = true;
+        }
+
+        if (MetaManager.Instance.SkipPreRaceCutscene)
+        {
+            if (preRacePlayableDirector != null)
+            {
+                preRacePlayableDirector.time = preRacePlayableDirector.duration;
+            }
+        }
+
+        while (!done)
+        {
+            yield return null;
+        }
+
+        if (OnPreRaceSetupOver != null)
+        {
+            OnPreRaceSetupOver();
+        }
+    }
+
+    void SkipPreRaceCutscene(InputActionEventData data)
+    {
+        if (data.GetButtonDown())
+        {
+            if (preRacePlayableDirector != null)
+            {
+                preRacePlayableDirector.time = preRacePlayableDirector.duration;
+            }
+        }
+    }
 
     /// <summary>
     /// Begins the round. Responsible for the 3..2..1..Go! portion of the start.
     /// </summary>
     IEnumerator BeginRound()
     {
-        /*if (PhotonNetwork.OfflineMode) {
-            useStartTimer = true;
-        }
-        else {
-            useStartTimer = NetworkManager.Instance.AllPlayersLoaded;
-            // NetworkManager.Instance.PlayersLoadedIntoScene++;
-        }
-
-        while (!useStartTimer) {
-            // ExitGames.Client.Photon.Hashtable myHash = new ExitGames.Client.Photon.Hashtable();
-            // myHash.Add("load", 0);
-            // PhotonNetwork.LocalPlayer.SetCustomProperties(myHash);
-            useStartTimer = NetworkManager.Instance.AllPlayersLoaded;
-
-            yield return 0;
-        }*/
-
         //only do 3..2..1..Go if devs want
-        if (useStartTimer)
+        if (!MetaManager.Instance.SkipPreRaceTimer)
         {
-            if (OnRaceCountdown!=null)
+            if (OnRaceCountdownStarted!=null)
             {
-                OnRaceCountdown();
+                OnRaceCountdownStarted();
             }
 
-            yield return new WaitForSeconds(0.5f);
-            roundStartPanel.SetActive(true);
-            yield return new WaitForSeconds(3.5f);
+            yield return new WaitForSeconds(4f);                // 4 because 3,2,1,Go being 4 seconds worth of pop ups
 
-            StartCoroutine(DisableRoundStartPanel());
+            if (OnRaceCountdownFinished!=null)
+            {
+                OnRaceCountdownFinished();
+            }
         }
 
         // enable player inputs again
         TeamManager.Instance.PlayerInputEnabled(true);
 
         startTime = Time.time;
+        RaceFinishTime = 0f;
+
         isRaceOver = false;
+        IsRaceUIAnimationOver = false;
+
+        rankSwitchCoroutineRunning = false;
 
         if (OnRaceBegin != null)
         {
             OnRaceBegin();
         }
 
-        Fling.Levels.LevelScriptableObject currentLevel = MetaManager.Instance.CurrentLevel;
-        wasLevelBeatenBefore = SaveManager.Instance.IsLevelBeaten(currentLevel);
-        wasSilverUnlockedBefore = SaveManager.Instance.IsLevelSilverTrophyUnlocked(currentLevel);
-        wasGoldUnlockedBefore = SaveManager.Instance.IsLevelGoldTrophyUnlocked(currentLevel);
-
-        silverUnlockedAnimator.enabled = false;
-        goldUnlockedAnimator.enabled = false;
-
-        levelBeatenAnimator.gameObject.SetActive(wasLevelBeatenBefore);
-        silverUnlockedAnimator.gameObject.SetActive(wasSilverUnlockedBefore);
-        goldUnlockedAnimator.gameObject.SetActive(wasGoldUnlockedBefore);
-
-        rankSwitchCoroutineRunning = false;
-
-        if (PlayerPrefs.GetInt("screenMode") == 0)
-        {
-            ranksPanel.SetActive(false);
-        }
-        else
-        {
-            ranksPanel.SetActive(true);
-        }
-    }
-
-    IEnumerator DisableRoundStartPanel()
-    {
-        yield return new WaitForSeconds(2f);
-        roundStartPanel.SetActive(false);
+        hasRaceStarted = true;
     }
 
     IEnumerator WaitForAllClientsToLoad()
     {
-        while (!NetworkManager.Instance.AllPlayersLoaded)
+        while (!NetworkManager.Instance.AllClientsLoaded)
         {
             yield return null;
         }
@@ -276,63 +338,65 @@ public class RaceManager : MonoBehaviour//PunCallbacks
         {
             raceTime = Time.time - startTime;
             //timerText.text = string.Format("{0:00}:{1:00}:{2:00}", minutes, seconds, milliseconds);
-            timerText.text = GetTimeFormatted(raceTime);
+            raceUI.UpdateTimerText(raceTime);
         }
 
-        if (isSlowingDown)
-        {
-            timerText.color = Color.Lerp(timerText.color, Color.white, Time.deltaTime * 15f);
-            //music.GetComponent<AudioSource>().pitch = Time.timeScale;
-            Time.timeScale -= 3f * Time.unscaledDeltaTime;
-            Time.timeScale = Mathf.Clamp(Time.timeScale, slowDownFactor, 1f);
-            Time.fixedDeltaTime = Time.timeScale * 0.02f;
-            if (Time.timeScale <= slowDownFactor)
-            {
-                isSlowingDown = false;
-                StartCoroutine(WaitBeforeSpeedUp(0.7f));
-            }
-            //Debug.Log("slow");
-        }
-        else if (isSpeedingUp)
-        {
-            //music.GetComponent<AudioSource>().pitch = Time.timeScale;
-            Time.timeScale += (1 / speedUpTime) * Time.unscaledDeltaTime;
-            Time.timeScale = Mathf.Clamp(Time.timeScale, 0f, 1f);
-            Time.fixedDeltaTime = Time.timeScale * 0.02f;
-            if (Time.timeScale >= 1f)
-            {
-                isSpeedingUp = false;
-            }
-            //Debug.Log("fast");
-        }
+        //if (isSlowingDown)
+        //{
+        //    timerText.color = Color.Lerp(timerText.color, Color.white, Time.deltaTime * 15f);
+        //    //music.GetComponent<AudioSource>().pitch = Time.timeScale;
+        //    Time.timeScale -= 3f * Time.unscaledDeltaTime;
+        //    Time.timeScale = Mathf.Clamp(Time.timeScale, slowDownFactor, 1f);
+        //    Time.fixedDeltaTime = Time.timeScale * 0.02f;
+        //    if (Time.timeScale <= slowDownFactor)
+        //    {
+        //        isSlowingDown = false;
+        //        StartCoroutine(WaitBeforeSpeedUp(0.7f));
+        //    }
+        //    //Debug.Log("slow");
+        //}
+        //else if (isSpeedingUp)
+        //{
+        //    //music.GetComponent<AudioSource>().pitch = Time.timeScale;
+        //    Time.timeScale += (1 / speedUpTime) * Time.unscaledDeltaTime;
+        //    Time.timeScale = Mathf.Clamp(Time.timeScale, 0f, 1f);
+        //    Time.fixedDeltaTime = Time.timeScale * 0.02f;
+        //    if (Time.timeScale >= 1f)
+        //    {
+        //        isSpeedingUp = false;
+        //    }
+        //    //Debug.Log("fast");
+        //}
     }
 
-    // EVERYTHING IN HERE NEEDS TO BE REWORKED
     void Update()
     {
-        if (!isRaceOver)
+        if (hasRaceStarted && !isRaceOver)
         {
-            if (PhotonNetwork.OfflineMode)
+            if (true /*PhotonNetwork.OfflineMode*/ )
             {
-                if (PlayerPrefs.GetInt("screenMode") == 1)
+                if (TeamManager.Instance.TotalNumberOfTeams > 1)
                 {
-                    if (!ranksPanel.activeSelf) ranksPanel.SetActive(true);
+                    // Team ranking in the race
+                    //if (!ranksPanel.activeSelf) ranksPanel.SetActive(true);
 
-                    List<int> initTeamRanks = new List<int>(teamPlaceRanks);        // don't copy the old list because that will just be a reference!
+                    //int teamsTotal = TeamManager.Instance.TotalNumberOfTeams;
+                    List<int> teamPlaceRanks = new List<int>(new int[indicesOfTeamsStillRacing.Count]);
+                    List<int> checkpointSortedIndicesOfTeams = new List<int>(new int[indicesOfTeamsStillRacing.Count]);
 
                     // Get first place
-                    for (int i = 0; i < 2 /*TeamManager.Instance.TeamsOnThisClient*/; i++)
+                    for (int i = 0; i < indicesOfTeamsStillRacing.Count; i++)
                     {
+                        int idxOfTeam = indicesOfTeamsStillRacing[i];
                         // ======================================= Find which team is at a later checkpoint =======================================
-
-                        if (currCheckpoint[i] == startingCheckpoint[i])
+                        if (currCheckpoint[idxOfTeam] == startingCheckpoint[idxOfTeam % 2])
                         {
                             teamPlaceRanks[i] = 0;
                         }
                         else
                         {
-                            if (allCheckpoints.Contains(currCheckpoint[i]))
-                                teamPlaceRanks[i] = allCheckpoints.IndexOf(currCheckpoint[i]) + 1;
+                            if (allCheckpoints.Contains(currCheckpoint[idxOfTeam]))
+                                teamPlaceRanks[i] = allCheckpoints.IndexOf(currCheckpoint[idxOfTeam]) + 1;
                             else
                             {
                                 Debug.LogWarning("Something's wrong with the checkpoints lists. Double click this warning and debug the Update() function");
@@ -341,150 +405,164 @@ public class RaceManager : MonoBehaviour//PunCallbacks
                         }
                     }
 
-                    // =============== If they are both at the same checkpoint, get their relative distance to both checkpoints ==================
-                    // This isn't scalable. We might have to find a different algorithm if we intend to use more than two teams (in case of networked multiplayer).
-                    // Here's a potential algorithm that could be useful but is untested:
-                    //  1. Find all players that share the same currCheckpoint
-                    //  2. For each of those players, find the distance from their last checkpoint and sort them out accordingly
-                    //  3. Do this for each list of players that share the same checkpoint (player 1 and 3 might be on checkpoint 5, player 2, 4 and 6 might be on checkpoint 4, etc.)
-                    //
-                    // Anyway, the current algorithm is much simpler and works for 2 teams.
+                    // This uses System.Linq. https://stackoverflow.com/a/53479678
+                    // Select() lambdas can take both value and index in the form of (x,i).
+                    // Select is like the MAP function in many languages
+                    var sorted = teamPlaceRanks
+                                .Select((x, i) => new { Checkpoint = x, TeamIndex = indicesOfTeamsStillRacing[i] })         // Map the value and index to a new ANONYMOUS type
+                                .OrderByDescending(x => x.Checkpoint)                                // Sort this new data type in the descending order of the value (meaning, teamPlaceRanks) [each checkpoint is at a greater index than its previous one]
+                                .ToList();                                                      // Convert this to a list
 
-                    if (teamPlaceRanks[0] == teamPlaceRanks[1])         // if both players have the same checkpoint
+                    // Now, we can get the indices of each team, ordered by their ranks in the race
+                    teamPlaceRanks = sorted.Select(x => x.Checkpoint).ToList();
+                    TeamIndicesOrderedByRank = sorted.Select(x => x.TeamIndex).ToList();
+                    checkpointSortedIndicesOfTeams = sorted.Select(x => x.TeamIndex).ToList();
+
+
+                    List<float> distancesRanks = new List<float>(new float[TeamIndicesOrderedByRank.Count]);
+
+                    for (int i = 0; i <= allCheckpoints.Count; i++)
                     {
-                        float team1sqrMag = TeamManager.Instance.SqrMagnitudeBetweenTeamAndVector(1, nextCheckpoint[0].position);
-                        float team2sqrMag = TeamManager.Instance.SqrMagnitudeBetweenTeamAndVector(2, nextCheckpoint[1].position);
+                        int idxA = teamPlaceRanks.IndexOf(i);            // find the first index of teams that are on this checkpoint
+                        int idxB = teamPlaceRanks.LastIndexOf(i);        // find the last index of teams that are on this checkpoint
 
-                        if (team1sqrMag < team2sqrMag)
+                        if (idxA >= 0 && idxB >= idxA)
                         {
-                            teamPlaceRanks[0] = 1;
-                            teamPlaceRanks[1] = 0;
-                        }
-                        else
-                        {
-                            teamPlaceRanks[0] = 0;
-                            teamPlaceRanks[1] = 1;
+                            List<int> tmp = teamPlaceRanks.GetRange(idxA, idxB - idxA + 1);
+                            List<float> distances = new List<float>(new float[tmp.Count]);
+
+                            for (int j = 0; j < tmp.Count; j++)
+                            {
+                                // Debug.Log(j + " " + (j + idxA));
+                                int teamIdx = checkpointSortedIndicesOfTeams[j + idxA];
+                                distances[j] = TeamManager.Instance.SqrMagnitudeBetweenTeamAndVector(teamIdx, nextCheckpoint[teamIdx].position);
+                            }
+
+                            var sortedNew = distances
+                                    .Select((x, idx) => new { DistanceToNextCheckpoint = x, TeamIndex = checkpointSortedIndicesOfTeams[idx + idxA] })
+                                    .OrderBy(x => x.DistanceToNextCheckpoint)
+                                    .ToList();
+
+                            distances = sortedNew.Select(x => x.DistanceToNextCheckpoint).ToList();
+                            List<int> indices = sortedNew.Select(x => x.TeamIndex).ToList();
+
+                            for (int j = 0; j < distances.Count; j++)
+                            {
+                                // Debug.Log(j + " + " + idxA + " " + idxB);
+                                TeamIndicesOrderedByRank[j + idxA] = indices[j];
+                                distancesRanks[j + idxA] = distances[j];
+                            }
                         }
                     }
 
-                    if (Mathf.Sign(teamPlaceRanks[0] - teamPlaceRanks[1]) != Mathf.Sign(initTeamRanks[0] - initTeamRanks[1]))      // Have the team place ranks changed in this frame?
-                    {
-                        Transform first = team1UILocation, second = team2UILocation;
-                        if (teamPlaceRanks[0] < teamPlaceRanks[1])
-                        {
-                            first = team2UILocation;
-                            second = team1UILocation;
-                        }
-                        else
-                        {
-                            first = team1UILocation;
-                            second = team2UILocation;
-                        }
+                    // Add any indices that have already won to the front of this list!
+                    indicesOfTeamsStillRacingRanked = new List<int>(TeamIndicesOrderedByRank);
+                    TeamIndicesOrderedByRank.InsertRange(0, FinalTeamIndicesOrderedByRank);
+                    TeamIndicesOrderedByRank.InsertRange(TeamIndicesOrderedByRank.Count, indicesOfTeamsThatQuit);
+                    // distances = tmp.Select((x, idx) => x = TeamManager.Instance.SqrMagnitudeBetweenTeamAndVector(idx + idxA, nextCheckpoint[idx + idxA - 1].position));
 
-                        /*if (!rankSwitchCoroutineRunning)*/
-                        StartCoroutine(SwitchRanks(first, second));
+                    // Display the ranks!
+                    for (int j = 0; j < TeamManager.Instance.TeamsOnThisClient; j++)
+                    {
+                        int teamIdx = TeamManager.Instance.IndicesOfTeamsOnThisClient[j];
+                        int rank = TeamIndicesOrderedByRank.IndexOf(teamIdx);
+
+                        int side = TeamManager.Instance.SpawnSideOfTeamsOnThisClient[j]; // == 2? teamIdx % 2 : 0;
+
+                        RaceUI.UpdateTeamRank(side, rank);
                     }
-                }
-                else if (ranksPanel.activeSelf)
-                {
-                    ranksPanel.SetActive(false);
                 }
             }
         }
 
+        bool pauseStateChangedThisFrame = false;
         // Change pause status of the game
-        if (systemPlayer.GetButtonDown("Start"))
+        if (systemPlayer.GetButtonDown("Pause"))
         {
-            if (hasWon)
+            bool wasInputFromKeyboard = systemPlayer.controllers.GetLastActiveController().type == ControllerType.Keyboard;
+
+            int idxA = TeamManager.Instance.IndicesOfTeamsOnThisClient[0];
+
+            if (IsRaceUIAnimationOver && (PhotonNetwork.OfflineMode || PhotonNetwork.IsMasterClient))
             {
                 MetaManager.Instance.LoadNextLevel();
             }
-            else if (!OptionsMenuManager.Instance.IsActive)
+            if (hasTeamFinishedRace[idxA] || (TeamManager.Instance.IndicesOfTeamsOnThisClient.Count > 1 && hasTeamFinishedRace[TeamManager.Instance.IndicesOfTeamsOnThisClient[1]]))
             {
-                TogglePauseMenu();
+                ForceFinishRace();
+            }
+            else if (wasInputFromKeyboard)  // was the input from keyboard? // we have to do this extra check because the ESC key is BOTH "Pause" and "Back" on the keyboard. This would lead to an issue where right after pausing the game would unpause
+            {
+                if (isPaused)
+                {
+                    CheckSettingsMenuAndUnpause();
+                }
+                else
+                {
+                    TogglePauseMenu();
+                }
+                pauseStateChangedThisFrame = true;
+            }
+            else    // the input was from a controller
+            {
+                if (!SettingsMenuManager.Instance.IsActive)
+                {
+                    TogglePauseMenu();
+                    pauseStateChangedThisFrame = true;
+                }
             }
         }
-
-        // If paused, return to main menu
-        if (systemPlayer.GetButtonDown("Select"))
+        // If player wants to go BACK, and the game is paused AND didn't pause the game this exact frame
+        if (systemPlayer.GetButtonDown("Back") && isPaused && !pauseStateChangedThisFrame)
         {
-            if (hasWon)
-            {
-                // MetaManager.Instance.LoadMainMenu();
-                PauseMenuLevelSelect();
-            }
-            else if (isPaused)
-            {
-                // TogglePauseMenu();                  // get rid of the pause panel and change timescale to 1
-                // MetaManager.Instance.LoadMainMenu();
-            }
-        }
-
-        if (systemPlayer.GetButtonDown("Restart"))
-        {
-            if (hasWon)
-            {
-                RestartLevel();
-            }
-        }
-        
-        // If player wants to go BACK, and the game is paused
-        if (systemPlayer.GetButtonDown("Back") && isPaused)
-        {
-            // If the options menu is open
-            if (OptionsMenuManager.Instance.IsActive)
-            {
-                DeactivateOptionsMenu();
-            }
-            else // get out of paused state
-            {
-                TogglePauseMenu();
-            }
+            CheckSettingsMenuAndUnpause();
         }
 
         /* ================ REMOVE WHEN NOT USING DEVMODE SCREEN MODE CHANGE ================ */
-        if (systemPlayer.GetButtonDown("ChangeSplitScreenStatus"))
+        if (DevScript.Instance.DevMode)
         {
-            Rect[] camRects;
-            if (PlayerPrefs.GetInt("screenMode") == 0)
+            if (systemPlayer.GetButtonDown("ChangeSplitScreenStatus") && TeamManager.Instance.TeamsOnThisClient == 2)
             {
-                PlayerPrefs.SetInt("screenMode", 1);
-                camRects = new Rect[] { new Rect(0, 0, 0.5f, 1f), new Rect(0.5f, 0, 0.5f, 1f) };
-                ChangeSplitLineStatus();
-            }
-            else
-            {
-                PlayerPrefs.SetInt("screenMode", 0);
-                camRects = new Rect[] { new Rect(0, 0, 1f, 1f), new Rect(0.5f, 0, 0.0f, 0.0f) };
-                ChangeSplitLineStatus();
+                Rect[] camRects;
+                //if (PlayerPrefs.GetInt("screenMode") == 0)
+                if (MenuData.LobbyScreenData.ScreenMode == 0)
+                {
+                    //PlayerPrefs.SetInt("screenMode", 1);
+                    MenuData.LobbyScreenData.ScreenMode = 1;
+                    RaceUI.SetSplitScreenActive(true);
+                }
+                else
+                {
+                    //PlayerPrefs.SetInt("screenMode", 0);
+                    MenuData.LobbyScreenData.ScreenMode = 0;
+                    camRects = new Rect[] { new Rect(0, 0, 1f, 1f), new Rect(0.5f, 0, 0.0f, 0.0f) };
+                    RaceUI.SetSplitScreenActive(false);
+                }
             }
 
-            for (int i = 0; i < 2; i++)
+            // If paused, return to main menu
+            if (systemPlayer.GetButtonDown("Select"))
             {
-                TeamManager.Instance.TeamInstance[i].GetComponentInChildren<Camera>().rect = camRects[i];
+               if (IsRaceUIAnimationOver && (PhotonNetwork.OfflineMode || PhotonNetwork.IsMasterClient))
+               {
+                   // MetaManager.Instance.LoadMainMenu();
+                   ReturnToLevelSelect();
+               }
+               else if (isPaused)
+               {
+                   TogglePauseMenu();                  // get rid of the pause panel and change timescale to 1
+                   // MetaManager.Instance.LoadMainMenu();
+               }
+            }
+
+            if (systemPlayer.GetButtonDown("Restart"))
+            {
+               if (IsRaceUIAnimationOver && (PhotonNetwork.OfflineMode) /* || PhotonNetwork.IsMasterClient)*/)
+               {
+                   RestartLevel();
+               }
             }
         }
-    }
-    
-    IEnumerator SwitchRanks(Transform first, Transform second)
-    {
-        rankSwitchCoroutineRunning = true;
-
-        float percentComplete = 0f;
-        float timeSinceStarted = 0f;
-
-        while (percentComplete < 1)
-        {
-            timeSinceStarted += Time.deltaTime;
-            percentComplete = timeSinceStarted / rankSwitchAnimationSpeed;
-
-            firstPlace.transform.position = Vector3.Slerp(second.position, first.position, percentComplete);
-            secondPlace.transform.position = Vector3.Slerp(first.position, second.position, percentComplete);
-
-            yield return null;
-        }
-
-        rankSwitchCoroutineRunning = false;
     }
 
     #region CHECKPOINT_AND_RESPAWNS
@@ -492,28 +570,86 @@ public class RaceManager : MonoBehaviour//PunCallbacks
     /// Sets the checkpoint of a given team.
     /// </summary>
     /// <param name="checkpoint">Transform of the checkpoint</param>
-    /// <param name="teamNumber">Team number of the team whose checkpoint is to be set</param>
-    public void SetCheckpoint(Transform checkpoint, int teamNumber)
+    /// <param name="teamIndex">Team index of the team whose checkpoint is to be set</param>
+    public void SetCheckpoint(Transform checkpoint, int teamIndex)
     {
-        if (checkpoint.gameObject != currCheckpoint[teamNumber - 1].gameObject)
+        int checkpointNum = 0;      // assume we were given the starting checkpoint
+        if (allCheckpoints.Contains(checkpoint))
         {
-            currCheckpoint[teamNumber - 1] = checkpoint;
+            checkpointNum = allCheckpoints.IndexOf(checkpoint) + 1;
+        }
+        else if (!startingCheckpoint.Contains(checkpoint))
+        {
+            Debug.LogWarning("Something's wrong in SetCheckpoint(Transform checkpoint, int teamNumber)");
+            return;
+        }
 
-            if (checkpoint == startingCheckpoint[teamNumber - 1])
+        SetCheckpoint(checkpointNum, teamIndex);
+        
+    }
+
+    /// <summary>
+    /// Overload for SetCheckpoint that takes the int index of the checkpoint
+    /// 0 - starting checkpoint
+    /// 1 to end - index of checkpoint in allCheckpoints + 1
+    /// </summary>
+    /// <param name="checkpoint"></param>
+    /// <param name="teamIndex"></param>
+    private void SetCheckpoint(int checkpoint, int teamIndex)
+    {
+        if (PhotonNetwork.OfflineMode)
+        {
+            SetCheckpointRPC(checkpoint, teamIndex);
+        }
+        else
+        {
+            photonView.RPC("SetCheckpointRPC", RpcTarget.All, checkpoint, teamIndex);
+        }
+    }
+
+    /// <summary>
+    /// RPC for the SetCheckpoint() method
+    /// </summary>
+    /// <param name="checkpoint"></param>
+    /// <param name="teamIndex"></param>
+    [PunRPC]
+    private void SetCheckpointRPC(int checkpoint, int teamIndex)
+    {
+        Transform chkPt;
+
+        if (checkpoint == 0)        // if respawning at starting checkpoint
+        {
+            chkPt = startingCheckpoint[(teamIndex) % 2];
+        }
+        else if (checkpoint > 0 && checkpoint <= allCheckpoints.Count)     // all other checkpoints
+        {
+            chkPt = allCheckpoints[checkpoint - 1];
+        }
+        else
+        {
+            Debug.LogWarning("Something's wrong in SetCheckpointRPC(int checkpoint, int teamNumber)");
+            return;
+        }
+
+        if (chkPt.gameObject != currCheckpoint[teamIndex].gameObject)
+        {
+            currCheckpoint[teamIndex] = chkPt;
+
+            if (chkPt == startingCheckpoint[(teamIndex) % 2])
             {
-                nextCheckpoint[teamNumber - 1] = allCheckpoints[0];
+                nextCheckpoint[teamIndex] = allCheckpoints[0];
             }
-            else if (checkpoint == winPoint.transform)
+            else if (chkPt == winPoint.transform)
             {
-                nextCheckpoint[teamNumber - 1] = winPoint.transform;
+                nextCheckpoint[teamIndex] = winPoint.transform;
             }
-            else if(allCheckpoints.IndexOf(checkpoint) == allCheckpoints.Count - 1)
+            else if (allCheckpoints.IndexOf(chkPt) == allCheckpoints.Count - 1)
             {
-                nextCheckpoint[teamNumber - 1] = winPoint.transform;
+                nextCheckpoint[teamIndex] = winPoint.transform;
             }
             else
             {
-                nextCheckpoint[teamNumber - 1] = allCheckpoints[allCheckpoints.IndexOf(checkpoint) + 1];
+                nextCheckpoint[teamIndex] = allCheckpoints[allCheckpoints.IndexOf(chkPt) + 1];
             }
         }
     }
@@ -535,10 +671,10 @@ public class RaceManager : MonoBehaviour//PunCallbacks
     /// <param name="team">Team number</param>
     IEnumerator DoRespawnInTime(float time, int team)
     {
-        teamDying = true;
+        teamDying[team] = true;
         yield return new WaitForSeconds(time);
         DoRespawn(team);
-        teamDying = false;
+        teamDying[team] = false;
     }
 
     /// <summary>
@@ -550,47 +686,49 @@ public class RaceManager : MonoBehaviour//PunCallbacks
     /// If in the future we need outside scripts to respawn the team in time, make the RespawnInTime coroutine public, or better, make a public function that starts that coroutine (just so we don't have to write lengthy syntaxes everywhere else).
     /// I'd prefer to have one messy script and everything else clean than have everything be messy.
     /// </remarks>
-    /// <param name="teamNumber"></param>
-    public void Respawn(int teamNumber)
+    /// <param name="teamIndex"></param>
+    public void Respawn(int teamIndex)
     {
-        if (teamDying)
+        if (teamDying[teamIndex])
             return;     // don't respawn team if already in the respawn sequence
 
-        DoRespawn(teamNumber);
+        if (TeamManager.Instance.IsTeamSharedOnline(teamIndex))
+        {
+            photonView.RPC("RespawnRPC", TeamManager.Instance.GetSharedTeammatePhotonPlayer(teamIndex), teamIndex);
+        }
+
+        // Debug.Log("Respawned my client team");
+        DoRespawn(teamIndex);
+    }
+
+    [PunRPC]
+    private void RespawnRPC(int teamIndex)
+    {
+        // Debug.Log("other teammate of " + teamIndex + " respawned");
+        if (teamDying[teamIndex])
+            return;
+
+        DoRespawn(teamIndex);
     }
 
     /// <summary>
     /// Respawns a team at a given checkpoint (indexed checkpoints).
     /// </summary>
     /// <param name="checkpoint">Index of checkpoint (indexed from 0)</param>
-    /// <param name="teamNumber">Team number (not indexed from 0)</param>
-    public void RespawnAtCheckpoint(int checkpoint, int teamNumber)
+    /// <param name="teamIndex">Team number (not indexed from 0)</param>
+    public void RespawnAtCheckpoint(int checkpoint, int teamIndex)
     {
-        if (teamNumber > 0 && teamNumber <= TeamManager.Instance.TeamsOnThisClient) // team number is valid
+        if (teamIndex >= 0 && teamIndex < TeamManager.Instance.TotalNumberOfTeams) // team number is valid
         {
-            if (checkpoint == 0)        // if respawning at starting checkpoint
+            if (checkpoint >= 0 && checkpoint <= allCheckpoints.Count)
             {
-                SetCheckpoint(startingCheckpoint[teamNumber - 1], teamNumber);
-                Respawn(teamNumber);
+                SetCheckpoint(checkpoint, teamIndex);
+                Respawn(teamIndex);
             }
-            else if (checkpoint > 0 && checkpoint <= allCheckpoints.Count)     // all other checkpoints
+            else
             {
-                SetCheckpoint(allCheckpoints[checkpoint - 1], teamNumber);
-                Respawn(teamNumber);
+                Debug.LogWarning("Something's wrong in RespawnAtCheckpoint");
             }
-            else {
-                Debug.Log("Something's wrong in RespawnAtCheckpoint");
-            }
-
-            // Technically, the Respawn(teamNumber) line can be moved out of all the if conditions and it would still respawn.
-            // Say I want to respawn at checkpoint 4 but levels only have 3 checkpoints.
-            // If I had the line outside of if conditions, I would still Respawn, but the currentCheckpoint wouldn't get updated.
-            // This would be confusing.
-            // One way of fixing that is adding another if condition checking if the entered checkpoint is valid,
-            // and then Respawning.
-            // We're already doing that check above, so I added the Respawn code in there.
-            //
-            // This is more for myself if I return here in the future and can't figure out why I did this. So please don't delete these comments.
         }
     }
 
@@ -600,7 +738,7 @@ public class RaceManager : MonoBehaviour//PunCallbacks
     /// <param name="checkpoint">Index of checkpoint (indexed from 0).</param>
     public void RespawnAllTeamsAtCheckpoint(int checkpoint)
     {
-        for (int i = 1; i <= TeamManager.Instance.TeamsOnThisClient; i++)
+        for (int i = 0; i < TeamManager.Instance.TotalNumberOfTeams; i++)
         {
             RespawnAtCheckpoint(checkpoint, i);
         }
@@ -609,191 +747,256 @@ public class RaceManager : MonoBehaviour//PunCallbacks
     /// <summary>
     /// Subscribe to this for all events that need to happen when a team dies (right before respawning).
     /// </summary>
-    /// <param name="teamNumber"></param>
-    public delegate void OnTeamDeathDelegate(int teamNumber);
+    /// <param name="teamIndex"></param>
+    public delegate void OnTeamDeathDelegate(int teamIndex);
     public event OnTeamDeathDelegate OnTeamDeath;
 
     /// <summary>
     /// Subscribe to this for all events that need to happen when a team respawns.
     /// </summary>
-    /// <param name="teamNumber"></param>
-    public delegate void OnTeamRespawnDelegate(int teamNumber);
+    /// <param name="teamIndex"></param>
+    public delegate void OnTeamRespawnDelegate(int teamIndex);
     public event OnTeamRespawnDelegate OnTeamRespawn;
 
     /// <summary>
     /// Does the actual respawning.
     /// </summary>
-    /// <param name="teamNumber"></param>
-    private void DoRespawn(int teamNumber)
+    /// <param name="teamIndex"></param>
+    private void DoRespawn(int teamIndex)
     {
-        // Call any methods that might have subscribed to this method.
-        if (OnTeamDeath != null)
+        StartCoroutine(DoRepsawnCoroutine(teamIndex));
+    }
+
+    private IEnumerator DoRepsawnCoroutine(int teamIndex)
+    {
+        if (teamIndex >= 0 && teamIndex < TeamManager.Instance.TotalNumberOfTeams && TeamManager.Instance.TeamInstance[teamIndex] != null)
         {
-            OnTeamDeath(teamNumber);
-        }
-
-        List<GameObject> copyPlungerList = new List<GameObject>(teamAttachedPlungers[teamNumber - 1]);
-        foreach (GameObject plunger in copyPlungerList) {
-            if (plunger != null) {
-                // Debug.Log(teamAttachedPlungers[teamNumber - 1].Count);
-                teamAttachedPlungers[teamNumber - 1].Remove(plunger);
-                // Debug.Log(teamAttachedPlungers[teamNumber - 1].Count);
-
-                Debug.Log(plunger.name);
-                FixedJoint fj = plunger.GetComponentInChildren<FixedJoint>();
-                Destroy(fj);
-                Destroy(plunger);
+            // Call any methods that might have subscribed to this method.
+            if (OnTeamDeath != null)
+            {
+                OnTeamDeath(teamIndex);
             }
+
+            List<GameObject> copyPlungerList = new List<GameObject>(teamAttachedPlungers[teamIndex]);
+            foreach (GameObject plunger in copyPlungerList)
+            {
+                if (plunger != null)
+                {
+                    teamAttachedPlungers[teamIndex].Remove(plunger);
+
+                    FixedJoint fj = plunger.GetComponentInChildren<FixedJoint>();
+                    Destroy(fj);
+                    Destroy(plunger);
+                }
+            }
+            teamAttachedPlungers[teamIndex].Clear();
+            // teamAttachedPlungers[teamIndex] = null;
+            // teamAttachedPlungers[teamIndex] = new List<GameObject>();
+
+            fallSoundPlayer.EmitSound();
+
+            GameObject currCamLocator = null;
+            List<Rigidbody> RBs = new List<Rigidbody>();
+
+            //Get all rigidbodies in the team in the order: Player 1 > Rope links > Player 2
+
+            CharacterContent characterInfo = TeamManager.Instance.TeamInstance[teamIndex].GetComponent<CharacterContent>();
+            RBs.Add(characterInfo.GetPlayerRigidbody(1));
+            RBs.AddRange(characterInfo.GetLinkRigidbodies());
+            RBs.Add(characterInfo.GetPlayerRigidbody(2));
+
+            currCamLocator = characterInfo.GetCameraLocator();
+
+            if (currCamLocator != null) currCamLocator.transform.position = currCheckpoint[teamIndex].transform.position;
+
+            float timeSinceStarted = 0f;
+            bool firstFrameOfDelay = true;
+
+            for (int i = 0; i < RBs.Count; i++)
+            {
+                RBs[i].velocity = Vector3.zero;
+                RBs[i].angularVelocity = Vector3.zero;
+                RBs[i].useGravity = false;
+                RBs[i].isKinematic = true;
+            }
+
+            while (timeSinceStarted < respawnDelayTime)
+            {
+                Vector3 offset = new Vector3(-2f, 1.5f + (1.1f * teamIndex), 0);
+                Quaternion linkRotation = Quaternion.Euler(new Vector3(0f, 0f, 90f));
+
+                Vector3 checkPointPosition = currCheckpoint[teamIndex].transform.position;
+                Quaternion checkPointRotation = currCheckpoint[teamIndex].transform.rotation;
+
+                for (int i = 0; i < RBs.Count; i++)
+                {
+                    RBs[i].velocity = Vector3.zero;
+                    RBs[i].angularVelocity = Vector3.zero;
+                    //RBs[i].useGravity = false;
+                    //RBs[i].isKinematic = true;
+                    RBs[i].transform.position = checkPointRotation * (offset) + checkPointPosition;
+                    if (i > 0 && i < (RBs.Count - 1))
+                        RBs[i].transform.rotation = checkPointRotation * linkRotation;
+                    //RBs[i].useGravity = true;
+                    //RBs[i].isKinematic = false;
+                    offset.x = offset.x + 0.275f;
+                }
+
+                Rigidbody temp = characterInfo.GetTempBody();
+                temp.transform.position = currCheckpoint[teamIndex].transform.position + new Vector3(0f, 2f, 0f);
+                temp.velocity = Vector3.zero;
+
+                if (firstFrameOfDelay)
+                {
+                    // Anything that needs to happen only during the FIRST frame when the team is teleported goes here
+
+                    // Call any methods that might have subscribed to this method.
+                    if (OnTeamRespawn != null)
+                    {
+                        OnTeamRespawn(teamIndex);
+                        // Debug.Log("here");
+                    }
+
+                    firstFrameOfDelay = false;
+                }
+
+                timeSinceStarted += Time.deltaTime;
+                yield return null;
+            }
+
+            for (int i = 0; i < RBs.Count; i++)
+            {
+                RBs[i].useGravity = true;
+                RBs[i].isKinematic = false;
+            }
+
+            //PoofPooler.Instance.SpawnFromPool ("SpherePoof", RBs[0].position, 80);
+            //PoofPooler.Instance.SpawnFromPool ("SpherePoof", RBs[RBs.Count - 1].position, 80);
         }
-        teamAttachedPlungers[teamNumber - 1].Clear();
-        // teamAttachedPlungers[teamNumber - 1] = null;
-        // teamAttachedPlungers[teamNumber - 1] = new List<GameObject>();
 
-        fallSoundPlayer.EmitSound();
-
-        GameObject currCamLocator = null;
-        List<Rigidbody> RBs = new List<Rigidbody>();
-
-        //Get all rigidbodies in the team in the order: Player 1 > Rope links > Player 2
-
-        CharacterContent characterInfo = TeamManager.Instance.TeamInstance[teamNumber - 1].GetComponent<CharacterContent>();
-        RBs.Add(characterInfo.GetPlayer(1));
-        RBs.AddRange(characterInfo.GetLinkRigidbodies());
-        RBs.Add(characterInfo.GetPlayer(2));
-
-        //PoofPooler.Instance.SpawnFromPool ("SpherePoof", RBs[0].position, 80);
-		//PoofPooler.Instance.SpawnFromPool ("SpherePoof", RBs[RBs.Count - 1].position, 80);
-
-        currCamLocator = characterInfo.GetCameraLocator();
-        currCamLocator.transform.position = currCheckpoint[teamNumber - 1].transform.position;
-
-        Vector3 offset = new Vector3(-2.5f, 2f, -1.5f * (teamNumber-1));
-        Quaternion linkRotation = Quaternion.Euler (new Vector3(0f, 0f, 90f));
-
-        Vector3 checkPointPosition = currCheckpoint[teamNumber - 1].transform.position;
-        Quaternion checkPointRotation = currCheckpoint[teamNumber - 1].transform.rotation;
-
-
-        for (int i = 0; i < RBs.Count; i++)
-        {
-            RBs[i].velocity = Vector3.zero;
-            RBs[i].angularVelocity = Vector3.zero;
-            RBs[i].useGravity = false;
-            RBs[i].isKinematic = true;
-            RBs[i].transform.position = checkPointRotation*(offset) + checkPointPosition;
-            if (i > 0 && i < (RBs.Count - 1))
-                RBs[i].transform.rotation = checkPointRotation * linkRotation;
-            RBs[i].useGravity = true;
-            RBs[i].isKinematic = false;
-            offset.x = offset.x + 0.275f;
-        }
-
-		//PoofPooler.Instance.SpawnFromPool ("SpherePoof", RBs[0].position, 80);
-		//PoofPooler.Instance.SpawnFromPool ("SpherePoof", RBs[RBs.Count - 1].position, 80);
-
-        Rigidbody temp = characterInfo.GetTempBody();
-        temp.transform.position = currCheckpoint[teamNumber - 1].transform.position + new Vector3(0f, 2f, 0f);
-        temp.velocity = Vector3.zero;
-
-        // Join the rope on respawn
-        //AbilityManager.Instance.JoinRope(teamNumber);
-
-        // Reset rope burn status on respawn
-        //AbilityManager.Instance.ResetRopeBurnStatus(teamNumber);
-
-        // Call any methods that might have subscribed to this method.
-        if (OnTeamRespawn != null)
-        {
-            OnTeamRespawn(teamNumber);
-        }
     }
     #endregion
 
     #region WINNING
+    [ContextMenu("Force race finish")]
+    public void ForceFinishRace()
+    {
+        int count = indicesOfTeamsStillRacingRanked.Count - 1;
+        if (MetaManager.Instance.isInTutorialLevel)
+        {
+            count = indicesOfTeamsStillRacingRanked.Count;
+        }
+
+        for (int i = 0; i < count; i++)
+        {
+            SetWinner(indicesOfTeamsStillRacingRanked[i]);
+        }
+    }
+
+
     /// <summary>
     /// Race won event delegate. Subscribe to this for all events that need to happen when a team has won.
     /// </summary>
-    /// <param name="teamNumber"></param>
-    public delegate void OnTeamWinDelegate(int teamNumber);
+    /// <param name="teamIndex"></param>
+    public delegate void OnTeamWinDelegate(int teamIndex);
     public event OnTeamWinDelegate OnTeamWin;
+    /* Functions subscribed to OnTeamWin():
+     * 
+     * ScreenManager.SetWinner();
+    */
     /// <summary>
     /// Sets a team as the winner of a race.
     /// </summary>
-    /// <param name="teamNumber">Team that has won</param>
-    public void SetWinner(int teamNumber)
+    /// <param name="teamIndex">Team that has won</param>
+    public void SetWinner(int teamIndex)
     {
-        // If tutorial level
-        if (MetaManager.Instance.isInTutorialLevel && PlayerPrefs.GetInt("screenMode") == 1)
+        if (PhotonNetwork.OfflineMode)
         {
-            if (winningTeam != 1 && winningTeam != 2)
-            {
-                winningTeam = teamNumber;
-                losingTeam = winningTeam == 1 ? 2 : 1;
-                //isSlowingDown = true;
+            SetWinnerLogic(teamIndex);
+        }
+        else /*if (PhotonNetwork.IsMasterClient)*/
+        {
+            photonView.RPC("SetWinnerLogic", RpcTarget.AllViaServer, teamIndex);
+        }
+    }
 
+    /// <summary>
+    /// Actual logic for the SetWinner() function
+    /// </summary>
+    /// <param name="teamIndex"></param>
+    [PunRPC]
+    private void SetWinnerLogic(int teamIndex)
+    {
+        if (!hasTeamFinishedRace[teamIndex])
+        {
+            // Debug.Log("finishhhh");
+            hasTeamFinishedRace[teamIndex] = true;
+            indicesOfTeamsStillRacing.Remove(teamIndex);
+            FinalTeamIndicesOrderedByRank.Add(teamIndex);
+            currCheckpoint[teamIndex] = winPoint.transform;
+
+            if (OnTeamWin != null)
+            {
+                OnTeamWin(teamIndex);
+            }
+
+            if (!hasSingleTeamFinishedRace)
+            {
+                hasSingleTeamFinishedRace = true;
+                RaceFinishTime = raceTime;
                 SaveManager.Instance.LevelBeaten(MetaManager.Instance.CurrentLevel, raceTime);
                 SaveManager.Instance.UnlockNextLevel();
-
-                tutorialWinAnimator.gameObject.SetActive(true);
-
-                float xMovePos = winningTeam == 1 ? -197 : 197;
-                foreach (RectTransform rT in tutorialWinObjects)
-                {
-                    Vector3 pos = rT.localPosition;
-                    pos.x = xMovePos;
-                    rT.localPosition = pos;
-                }
             }
-            else if (teamNumber == losingTeam)
+
+            if (winningTeam < 0)
             {
-                tutorialWinAnimator.SetTrigger("Deactivate");
-                tutorialWinAnimator.gameObject.SetActive(false);
-                isSlowingDown = true;
-                isRaceOver = true;
-                winPoint.GetComponent<BoxCollider>().enabled = false;
-                splitline.gameObject.SetActive(false);
+                winningTeam = teamIndex;
+                if (TeamManager.Instance.TeamsOnThisClient == 2 && TeamManager.Instance.IndicesOfTeamsOnThisClient.Contains(winningTeam))
+                {
+                    int idxOfWinner = TeamManager.Instance.IndicesOfTeamsOnThisClient.IndexOf(winningTeam);
+                    losingTeamOnClient = TeamManager.Instance.IndicesOfTeamsOnThisClient[1 - idxOfWinner];
+                    //splitline.gameObject.SetActive(false);
+                }
+                //isSlowingDown = true;
+                //winPoint.GetComponent<BoxCollider>().enabled = false;
 
                 hasWon = true;
-
-                if (OnTeamWin != null)
-                {
-                    OnTeamWin(winningTeam);
-                }
-
-                if (OnRaceFinish != null)
-                {
-                    OnRaceFinish();
-                }
             }
 
-            return;
+            NumberOfTeamsThatHaveFinishedRace++;
+            
+            // If not tutorial, finish when second to last place team finishes race
+            if (!MetaManager.Instance.isInTutorialLevel && NumberOfTeamsThatHaveFinishedRace >= TeamManager.Instance.TotalNumberOfTeams - 1)
+            {
+                int idxOfLastTeam = hasTeamFinishedRace.IndexOf(false);
+                NumberOfTeamsThatHaveFinishedRace = TeamManager.Instance.TotalNumberOfTeams;
+                FinalTeamIndicesOrderedByRank.Add(idxOfLastTeam); // = NumberOfTeamsThatHaveFinishedRace - 1;
+            }
+
+            CheckForRaceFinish();
         }
+    }
 
-        // All other levels
-
-        if (OnTeamWin != null)
+    /// <summary>
+    /// Check whether the race is over or not, and if it is, call the OnRaceFinish() event and show the race finish UI.
+    /// </summary>
+    private void CheckForRaceFinish()
+    {
+        if (NumberOfTeamsThatHaveFinishedRace >= TeamManager.Instance.TotalNumberOfTeams)
         {
-            OnTeamWin(teamNumber);
-        }
+            if (FinalTeamIndicesOrderedByRank.Count != NumberOfTeamsThatHaveFinishedRace)
+            {
+                FinalTeamIndicesOrderedByRank.AddRange(indicesOfTeamsThatQuit);
+            }
 
-        if (OnRaceFinish!=null)
-        {
-            OnRaceFinish();
-        }
-
-        SaveManager.Instance.LevelBeaten(MetaManager.Instance.CurrentLevel, raceTime);
-        SaveManager.Instance.UnlockNextLevel();
-
-        if (winningTeam != 1 || winningTeam != 2)
-        {
-            winningTeam = teamNumber;
-            losingTeam = winningTeam == 1 ? 2 : 1;
-            isSlowingDown = true;
             isRaceOver = true;
             winPoint.GetComponent<BoxCollider>().enabled = false;
-            splitline.gameObject.SetActive(false);
 
-            hasWon = true;
+            if (OnRaceFinish != null)
+            {
+                OnRaceFinish();
+                OnRaceFinish -= NetworkManager.Instance.OnRaceFinishNetworkCleanUp;
+            }
         }
     }
 
@@ -802,83 +1005,6 @@ public class RaceManager : MonoBehaviour//PunCallbacks
     {
         yield return new WaitForSeconds(time);
         isSpeedingUp = true;
-        if (isRaceOver)
-        {
-            timerPanel.GetComponent<Animator>().SetTrigger("Deactivate");
-            ActivateUI();
-        }
-    }
-
-    // Activates the winner UI after wins.
-    void ActivateUI()
-    {
-        StartCoroutine(Wait(0.5f));
-        winPanel.SetActive(true);
-        winTimerText.text = "Time: " + timerText.text;
-        winTimerText2.text = "Time: " + timerText.text;
-
-        float bestTime = SaveManager.Instance.GetBestTime(MetaManager.Instance.CurrentLevel);
-        string formattedBestTime = GetTimeFormatted(bestTime);
-
-        bestTimeText.text = "Best Time: " + formattedBestTime;
-        bestTimeText2.text = "Best Time: " + formattedBestTime;
-
-        CharacterContent winningCharacterContent = TeamManager.Instance.GetTeamCharacterContent(winningTeam);
-        winnerText.text = winningCharacterContent.teamName;
-        winnerText2.text = winningCharacterContent.teamName;
-
-        StartCoroutine(ShowTrophies());
-        // if (winningTeam == 1)
-        // {
-        //     winnerText.text = "RoboSnail";
-        //     winnerText2.text = "RoboSnail";
-        // }
-        // else
-        // {
-        //     winnerText.text = "SheepToad";
-        //     winnerText2.text = "SheepToad";
-        // }
-    }
-
-    IEnumerator ShowTrophies()
-    {
-        yield return new WaitForSeconds(2f);
-
-        Fling.Levels.LevelScriptableObject currentLevel = MetaManager.Instance.CurrentLevel;
-        levelBeatenAnimator.enabled = true;
-
-        if (!wasLevelBeatenBefore)
-        {
-            levelBeatenAnimator.gameObject.SetActive(true);
-            levelBeatenAnimator.SetTrigger("Unlock");
-            yield return new WaitForSeconds(0.5f);
-        }
-
-        levelBeatenAnimator.enabled = false;
-
-        if (SaveManager.Instance.IsLevelSilverTrophyUnlocked(currentLevel))
-        {
-            silverUnlockedAnimator.gameObject.SetActive(true);
-            silverUnlockedAnimator.enabled = true;
-            if (!wasSilverUnlockedBefore)
-            {
-                silverUnlockedAnimator.SetTrigger("Unlock");
-                yield return new WaitForSeconds(0.5f);
-            }
-        }
-        silverUnlockedAnimator.enabled = false;
-
-        if (SaveManager.Instance.IsLevelGoldTrophyUnlocked(currentLevel))
-        {
-            goldUnlockedAnimator.gameObject.SetActive(true);
-            goldUnlockedAnimator.enabled = true;
-            if (!wasGoldUnlockedBefore)
-            {
-                goldUnlockedAnimator.SetTrigger("Unlock");
-                yield return new WaitForSeconds(0.5f);
-            }
-        }
-        goldUnlockedAnimator.enabled = false;
     }
 
     IEnumerator Wait(float time)
@@ -887,27 +1013,27 @@ public class RaceManager : MonoBehaviour//PunCallbacks
     }
     #endregion
 
-    #region PAUSE_MENU
-    public void ChangeSplitLineStatus()
+    public void EndOfRaceUIAnimationFinished()
     {
-        splitline.SetActive(!splitline.activeSelf);
+        IsRaceUIAnimationOver = true;
     }
 
-    public void ChangeLevelAbilityMode(Fling.Levels.LevelAbilityMode levelAbilityMode) {
-        if(MetaManager.Instance.levelAbilityMode == Fling.Levels.LevelAbilityMode.Anvil) {
-            AbilityManager.Instance.DetachAnvilFromAllTeams();
-        }
-        else if(MetaManager.Instance.levelAbilityMode == Fling.Levels.LevelAbilityMode.SpringRope) {
-            AbilityManager.Instance.DeactivateSolidRopeForAllTeams();
-        }
+    #region PAUSE_MENU
+    public UnityAction<bool> OnGamePaused;
 
-        MetaManager.Instance.levelAbilityMode = levelAbilityMode;
-
-        if(levelAbilityMode == Fling.Levels.LevelAbilityMode.Anvil) {
-            AbilityManager.Instance.AttachAnvilToAllTeams();
+    private void CheckSettingsMenuAndUnpause()
+    {
+        // If the options menu is open
+        if (SettingsMenuManager.Instance.IsActive)
+        {
+            if (SettingsMenuManager.Instance.CanExitSettingsMenu)
+            {
+                DeactivateSettingsMenu();
+            }
         }
-        else if(levelAbilityMode == Fling.Levels.LevelAbilityMode.SpringRope) {
-            AbilityManager.Instance.GiveSolidRopeToAllTeams();
+        else // get out of paused state
+        {
+            TogglePauseMenu();
         }
     }
 
@@ -916,6 +1042,11 @@ public class RaceManager : MonoBehaviour//PunCallbacks
     /// </summary>
     public void TogglePauseMenu() {
         isPaused = !isPaused;
+        if (OnGamePaused != null)
+        {
+            OnGamePaused(isPaused);
+        }
+
         if (PhotonNetwork.OfflineMode) {
             Time.timeScale = isPaused == true ? 0 : 1;
         }
@@ -933,19 +1064,19 @@ public class RaceManager : MonoBehaviour//PunCallbacks
         }
     }
 
-    public void ActivateOptionsMenu()
+    public void ActivateSettingsMenu()
     {
         if (isPaused)
         {
             pauseMenuCanvas.SetActive(false);
         }
 
-        OptionsMenuManager.Instance.ActivateOptionsMenu();
+        SettingsMenuManager.Instance.ActivateMenu();
     }
 
-    public void DeactivateOptionsMenu()
+    public void DeactivateSettingsMenu()
     {
-        OptionsMenuManager.Instance.DeactivateOptionsMenu();
+        SettingsMenuManager.Instance.DeactivateMenu();
 
         if (isPaused)
         {
@@ -957,11 +1088,35 @@ public class RaceManager : MonoBehaviour//PunCallbacks
     /// <summary>
     /// Load the main menu and update to level select through the pause menu.
     /// </summary>
-    public void PauseMenuLevelSelect() {
+    public void ReturnToLevelSelect() {
         if (isPaused) {
             TogglePauseMenu();
         }
         MetaManager.Instance.LoadMainMenu(Menus.MenuState.WORLD_SELECT);
+    }
+
+    /// <summary>
+    /// Load the main menu through the pause menu.
+    /// </summary>
+    public void PauseMenuSplashScreen() {
+        if (isPaused) {
+            TogglePauseMenu();
+        }
+
+        if (PhotonNetwork.OfflineMode) {
+            MetaManager.Instance.LoadMainMenu();
+        }
+        else {
+            NetworkManager.Instance.Disconnect();
+            MetaManager.Instance.LoadMainMenu();
+        }
+    }
+
+    /// <summary>
+    /// Quit and close the application.
+    /// </summary>
+    public void PauseMenuQuitGame() {
+        Application.Quit();
     }
 
     /// <summary>
@@ -973,26 +1128,76 @@ public class RaceManager : MonoBehaviour//PunCallbacks
     }
     #endregion
 
-    /* ============ RACE EVENTS ============ */
-    #region RACE_EVENTS
-    public delegate void OnRaceCountdownDelegate();
-    public event OnRaceCountdownDelegate OnRaceCountdown;
-
-    public delegate void OnRaceStartDelegate();
-    public event OnRaceStartDelegate OnRaceBegin;
-
-    public delegate void OnRaceFinishDelegate();
-    public event OnRaceFinishDelegate OnRaceFinish;
-    #endregion
-
-    #region HELPER_FUNCTIONS
-    private string GetTimeFormatted(float t)
+    #region END_OF_RACE
+    public void ContinueButton()
     {
-        string minutes = ((int)t / 60).ToString("d2");
-        string seconds = ((int)(t % 60)).ToString("d2");
-        string milliseconds = ((int)(((t % 60) % 1) * 100)).ToString("d2");
+        if (IsRaceUIAnimationOver && (PhotonNetwork.OfflineMode || PhotonNetwork.IsMasterClient))
+        {
+            MetaManager.Instance.LoadNextLevel();
+        }
+    }
 
-        return (minutes + ":" + seconds + ":" + milliseconds);
+    public void LevelSelectButton()
+    {
+        if (IsRaceUIAnimationOver && (PhotonNetwork.OfflineMode || PhotonNetwork.IsMasterClient))
+        {
+            // MetaManager.Instance.LoadMainMenu();
+            ReturnToLevelSelect();
+        }
+    }
+    public void RestartButton()
+    {
+        if (IsRaceUIAnimationOver && (PhotonNetwork.OfflineMode) /* || PhotonNetwork.IsMasterClient)*/)
+        {
+            RestartLevel();
+        }
     }
     #endregion
+
+    #region PUN Callbacks
+
+    /// <summary>
+    /// Triggered when a client disconnects from the room
+    /// </summary>
+    /// <param name="clientID"></param>
+    /// <param name="indicesOfTeamsThatLeft"></param>
+    private void OnTeamsLeftRoom(Photon.Realtime.Player player, List<int> indicesOfTeamsThatLeft, List<int> sharedTeamIndices)
+    {
+        for (int i = 0; i < indicesOfTeamsThatLeft.Count; i++)
+        {
+            hasTeamFinishedRace[indicesOfTeamsThatLeft[i]] = true;
+            indicesOfTeamsStillRacing.Remove(indicesOfTeamsThatLeft[i]);
+        }
+
+        indicesOfTeamsThatQuit.InsertRange(0, indicesOfTeamsThatLeft);
+        NumberOfTeamsThatHaveFinishedRace += indicesOfTeamsThatQuit.Count;
+        CheckForRaceFinish();
+    }
+    #endregion
+    /* ============ RACE EVENTS ============ */
+    #region RACE_EVENTS
+    public UnityAction OnPreRaceSetupStarted;
+    public UnityAction OnPreRaceSetupOver;
+
+    /* Functions subscribed
+     * 
+     * SoundManager.OnRaceCountdown
+     */
+    public UnityAction OnRaceCountdownStarted;
+    public UnityAction OnRaceCountdownFinished;
+
+    public UnityAction OnRaceBegin;
+
+    public UnityAction OnRaceFinish;
+    /* Functions subscribed to OnRaceFinish():
+     * 
+     * SoundManager.OnRaceFinish();
+    */
+    #endregion
+
+    private void OnDestroy()
+    {
+        NetworkManager.Instance.OnTeamsLeftRoom -= OnTeamsLeftRoom;
+        OnRaceFinish -= NetworkManager.Instance.OnRaceFinishNetworkCleanUp;
+    }
 }

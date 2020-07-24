@@ -8,7 +8,6 @@ IMenuState: Interface for all menu-states in the state machine based menu archit
 MenuState_LobbyScreen: The game's lobby screen where players chose their controller layout.
 
 
-
 Portions of the scripts mentioned below were contributed to by my teammates as well.
 
 ---------------------- Systems -----------------------
@@ -16,7 +15,9 @@ MetaManager: The overarching game manager script. Handles data persistence and s
 
 NetworkManager: The overarching network syncing script. Keeps track of all online systems such as client ID and connectivity status.
 
-RaceManager: The script that manages all aspects of a race. Exists only in playable scenes (not menus). Handles things such as starting the race, keeping track of player checkpoints, winning, etc.
+RaceManager: Manages all aspects of a race. Exists only in playable scenes (not menus). Handles things such as starting the race, keeping track of player checkpoints, winning, etc.
+
+RaceUIManager: Manages the HUD, pre-race and post-race UI of the game. Responds to race events fired by RaceManager.cs.
 
 ---------------------- Gameplay -----------------------
 PlayerInput: Responsible for reading input from the player and passing it to PlayerMovement.cs and RopeManager.cs. Each player in the team has their own PlayerInput.cs script.

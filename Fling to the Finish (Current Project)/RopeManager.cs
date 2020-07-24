@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using UnityEngine;
 using Photon.Pun;
+using FMODUnity;
 
 public class RopeManager : MonoBehaviourPun
 {
@@ -20,6 +21,7 @@ public class RopeManager : MonoBehaviourPun
     public Transform[] links;
     public Transform[] ropeJoints;
     public Transform[] cutJoints;
+    public Transform[] springRopeJoints;
     private CapsuleCollider[] linkColliders;
     private Rigidbody[] linkRBs;
     private Transform[] linkDisplay;
@@ -32,14 +34,20 @@ public class RopeManager : MonoBehaviourPun
     public Rigidbody tempBody;
     public Rigidbody anvil;
     public SolidRopeLink[] solidRopeLinks;
+    public RopeFlingResetTrigger[] ropeFlingResetTriggers;
+    [SerializeField]
+    private TeamDragManager teamDragManager;
 
     [Header("Fling Feedback")]
+    public CameraShaker cameraShake;
     public GameObject[] strainParticles;
     public GameObject[] flingTrail;
 
     public AnimationCurve flingTrailSize;
 
     public GameObject[] perfectFling;
+    public RopeFlashLine ropeFlashLine;
+    private bool ropeIsFlashing = true;
 
     [Header("Arrow")]
     public GameObject tugArrow;
@@ -48,6 +56,7 @@ public class RopeManager : MonoBehaviourPun
 
     [Header("Rope Types")]
     public GameObject attachedRope;
+    public GameObject springRope;
     public GameObject cutRope;
     private bool isRopeCut;
     /// <summary>
@@ -55,46 +64,51 @@ public class RopeManager : MonoBehaviourPun
     /// </summary>
     public bool IsRopeCut { get { return isRopeCut; } }
 
-    [Header("AudioPlayers")]
-    public GenericSoundPlayer whipSoundPlayer;
-    public GenericSoundPlayer flingSoundPlayer;
-    public GenericSoundPlayer cutSoundPlayer;
+    [Header("Audio")]
+    
+
+    [SerializeField, EventRef] private string whipSoundEventPath;
+    private FMOD.Studio.EventInstance whipSound;
+    [SerializeField, EventRef] private string flingSoundEventPath;
+    private FMOD.Studio.EventInstance flingSound;
+    [SerializeField, EventRef] private string cutSoundEventPath;
+    private FMOD.Studio.EventInstance cutSound;
 
     [Header("ParticlePlayers")]
     public ParticleSystem cutParticles;
 
     private bool pullReady = true;
-    private float pullTime = 1.3f;
+    private float pullTime = 1f;
     private float pullTimer = 0.0f;
 
+    // Limit in-air flinging variables
+    [SerializeField]
+    private int maxAirFlings = 2;
+    private int inAirFlings = 0;
+    private int nPlayersClamped = 0;
+    private bool subscribedToFlingResetEvents = false;
+
     private float partnerDistance;
+    private float flingModifier = 1.0f;
+    private float balloonFlingModifier = 0.2f;
+    private float defaultFlingModifier = 1f;
     private Vector3 forceToBeApplied;
     private Vector3 newVel;
 
-    private float averageLinkDistance;
-
-    private int teamNumber;
-    public int TeamNumber
+    public float averageLinkDistance { get; private set; }
+    public int TeamIndex { get; set; }
+    public void SetTeam(int teamIndex)
     {
-        get { return teamNumber; }
-        set { teamNumber = value; }
-    }
-    public void SetTeamNumber(int teamNum)
-    {
-        TeamNumber = teamNum;
+        TeamIndex = teamIndex;
         LateStart();
     }
+
+    private PlayerMovement[] partnerPMs;
 
     private int partnerNum;
     private bool isStraining;
     private float strainShakeRot = 25f;
     private float strainShakeScale = 0.3f;
-    private float characterSavedDrag;
-    private float characterStrainDrag = 10f;
-    private float characterSavedAngularDrag;
-    private float characterStrainAngularDrag = 10f;
-    private float linkSavedDrag;
-    private float linkStrainDrag = 5f;
     private float anvilSavedMass;
     private float anvilSavedDrag;
     private float anvilStrainMass = 2f;
@@ -102,7 +116,7 @@ public class RopeManager : MonoBehaviourPun
 
     private bool debugRope = false;
 
-    public bool useNewFlingDirection = true;
+    //public bool useNewFlingDirection = true;
     public AnimationCurve flingDirectionAngleCurve;
 
     private bool isRopeSolid = false;
@@ -118,10 +132,11 @@ public class RopeManager : MonoBehaviourPun
 
     // Use this for initialization
     void Start()
-    { 
+    {
         // Game starts with the rope connected
         attachedRope.SetActive(true);
         cutRope.SetActive(false);
+        springRope.SetActive(false);
         tempBody.gameObject.SetActive(false);
 
         linkColliders = new CapsuleCollider[links.Length];
@@ -130,6 +145,10 @@ public class RopeManager : MonoBehaviourPun
 
         partnerColliders[0] = partnerRB[0].GetComponent<SphereCollider>();
         partnerColliders[1] = partnerRB[1].GetComponent<SphereCollider>();
+
+        partnerPMs = new PlayerMovement[2];
+        partnerPMs[0] = partnerRB[0].GetComponent<PlayerMovement>();
+        partnerPMs[1] = partnerRB[1].GetComponent<PlayerMovement>();
 
         for (int i = 0; i < links.Length; i++)
         {
@@ -151,13 +170,49 @@ public class RopeManager : MonoBehaviourPun
 
         strainParticles[0].SetActive(false); strainParticles[1].SetActive(false);
         flingTrail[0].SetActive(false); flingTrail[1].SetActive(false);
+
+        // Subscribe resetting inAirFlings to 0 as soon as a RopeFlingResetTrigger is triggered
+        foreach (RopeFlingResetTrigger trigger in ropeFlingResetTriggers)
+        {
+            if (!subscribedToFlingResetEvents) trigger.OnTrigger += () => inAirFlings = 0;
+
+            // Since the RopeFlingResetTrigger colliders are on the Default layer, Player's think of them as a jumpable object.
+            // Instead of making a new layer for these objects, just ignore collision for each of them
+            Physics.IgnoreCollision(partnerColliders[0], trigger.GetComponent<Collider>());
+            Physics.IgnoreCollision(partnerColliders[1], trigger.GetComponent<Collider>());
+        }
+
+        // Also ignore collision between all three RopeFlingResetTriggers
+        Physics.IgnoreCollision(ropeFlingResetTriggers[0].GetComponent<Collider>(), ropeFlingResetTriggers[1].GetComponent<Collider>());
+        Physics.IgnoreCollision(ropeFlingResetTriggers[0].GetComponent<Collider>(), ropeFlingResetTriggers[2].GetComponent<Collider>());
+        Physics.IgnoreCollision(ropeFlingResetTriggers[1].GetComponent<Collider>(), ropeFlingResetTriggers[2].GetComponent<Collider>());
+
+        if (!subscribedToFlingResetEvents)
+        {
+            // Also subscribe resetting inAirFlings to 0 as soon as any player is grounded
+            for (int i = 0; i < 2; i++)
+            {
+                partnerPMs[i].OnGrounded += () => inAirFlings = 0;
+                partnerPMs[i].OnPlayerClamp += (t, p, c) => { nPlayersClamped++; };
+                partnerPMs[i].OnPlayerUnclamp += (t, p) => { inAirFlings = 0; nPlayersClamped--; };
+            }
+
+            subscribedToFlingResetEvents = true;
+        }
+
+        inAirFlings = 0;
+
+        // Setup FMOD audio stuff
+        whipSound = RuntimeManager.CreateInstance(whipSoundEventPath);
+        flingSound = RuntimeManager.CreateInstance(flingSoundEventPath);
+        cutSound = RuntimeManager.CreateInstance(cutSoundEventPath);
     }
-    void LateStart()
+
+    private void LateStart()
     {
-        
         for (int i = 0; i < links.Length; i++)
         {
-            if (teamNumber == 1)
+            if (TeamIndex == 0)
             {
                 links[i].gameObject.layer = 14;
             }
@@ -166,17 +221,16 @@ public class RopeManager : MonoBehaviourPun
                 links[i].gameObject.layer = 15;
             }
         }
-        
-
-        strainParticles[0].SetActive(false); strainParticles[1].SetActive(false);
-        flingTrail[0].SetActive(false); flingTrail[1].SetActive(false);
     }
 
     private void Update()
     {
-        if (Input.GetKeyUp("r"))
+        if (DevScript.Instance.DevMode)
         {
-            ToggleRopeDebug();
+            if (Input.GetKeyUp("r"))
+            {
+                ToggleRopeDebug();
+            }
         }
 
         if (pullReady)
@@ -197,19 +251,12 @@ public class RopeManager : MonoBehaviourPun
 
         if (isRopeCut)
             UpdateCutRopeJoints();
+        else if (isRopeSolid)
+            UpdateSpringRopeJoints();
         else
             UpdateRopeJoints();
 
-        // =============== MOVE THIS TO TRIGGER LISTENER ONCE LASER IS FUNCTIONAL ===============
-        /*if (Input.GetKeyDown(KeyCode.C))
-        {
-            if (!isRopeCut)
-                GameManager.Instance.CutRope(teamNumber);
-            else
-                GameManager.Instance.JoinRope(teamNumber);
-
-            //isRopeCut = !isRopeCut;
-        }*/
+        ShouldRopeFlashCheck();
     }
 
     void UpdateRopeJoints()
@@ -236,6 +283,33 @@ public class RopeManager : MonoBehaviourPun
             {
                 ropeJoints[i].position = partnerRB[1].transform.position;
                 ropeJoints[i].rotation = ropeJoints[i - 1].rotation;
+            }
+        }
+    }
+    void UpdateSpringRopeJoints()
+    {
+        for (int i = 0; i < ropeJoints.Length; i++)
+        {
+
+            if (i == 0)
+            {
+                springRopeJoints[i].position = partnerRB[0].transform.position;
+                springRopeJoints[i].LookAt(links[0].transform.position);
+            }
+            else if (i < ropeJoints.Length - 2)
+            {
+                springRopeJoints[i].position = links[i - 1].transform.position;
+                springRopeJoints[i].LookAt(links[i].transform.position);
+            }
+            else if (i < ropeJoints.Length - 1)
+            {
+                springRopeJoints[i].position = links[i - 1].transform.position;
+                springRopeJoints[i].LookAt(partnerRB[1].transform.position);
+            }
+            else
+            {
+                springRopeJoints[i].position = partnerRB[1].transform.position;
+                springRopeJoints[i].rotation = ropeJoints[i - 1].rotation;
             }
         }
     }
@@ -287,6 +361,7 @@ public class RopeManager : MonoBehaviourPun
             linkColliders[i].height = newHeight;
             linkDisplay[i].localScale = new Vector3(0.29f, newHeight / 2f, 0.29f);
         }
+        
     }
 
     // Update is called once per frame
@@ -321,27 +396,10 @@ public class RopeManager : MonoBehaviourPun
 
         if (isStraining)
         {
-            // foreach(Rigidbody body in linkRBs)
-            // {
-            //     if (body.GetComponent<PhotonView>().IsMine) {
-            //         body.AddForce(Vector3.up * 30f, ForceMode.Force);
-            //     }
-            //     else {
-            //         FlingRigidbody(body.GetComponent<PhotonView>().ViewID);
-            //     }
-            // }
-
-            for (int i = 0; i < linkRBs.Length; i++) {
+            for (int i = 0; i < linkRBs.Length; i++)
+            {
                 Rigidbody body = linkRBs[i];
                 FlingLinkRBAtIndex(i);
-
-                /*if (PhotonNetwork.OfflineMode || body.GetComponent<PhotonView>().IsMine) {
-                    body.AddForce(Vector3.up * 30f, ForceMode.Force);
-                }
-                else {
-                    FlingLinkRBAtIndex(i);
-                    body.AddForce(Vector3.up * 30f, ForceMode.Force);
-                }*/
             }
             
             anvil.AddForce(Vector3.up * 100f, ForceMode.Force);
@@ -360,14 +418,16 @@ public class RopeManager : MonoBehaviourPun
         
         Rigidbody body = linkRBs[linkIndex];
         if (!PhotonNetwork.OfflineMode && !body.GetComponent<PhotonView>().IsMine)
-        {            
+        {
             // Stuff to do on all clients
             photonView.RPC("FlingLinkRBAtIndexRPC", linkRBs[linkIndex].GetComponent<PhotonView>().Owner, linkIndex);
         }
-
-        // Fling this client's rigidbody in all scenarios
-        // We fling the RB on both the owner and the partner client even in case of two clients in one team for consistency reasons
-        body.AddForce(Vector3.up * 30f, ForceMode.Force);
+        else
+        {
+            // Fling this client's rigidbody in all scenarios
+            // We fling the RB on both the owner and the partner client even in case of two clients in one team for consistency reasons
+            body.AddForce(Vector3.up * 30f, ForceMode.Force);
+        }
     }
 
     /// <summary>
@@ -381,11 +441,13 @@ public class RopeManager : MonoBehaviourPun
         body.AddForce(Vector3.up * 30f, ForceMode.Force);
     }
 
-	public void MakeRopeSolid(bool state)
+    public void MakeRopeSolid(bool state)
     {
-		isRopeSolid = state;
+        isRopeSolid = state;
         PoofPooler.Instance.SpawnFromPool("SpherePoof", midLink.transform.position, 40);
-        myRopeColor.SetRopeMaterialSolid (state);
+        //myRopeColor.SetRopeMaterialSolid (state);
+        attachedRope.SetActive(!state);
+        springRope.SetActive(state);
 
     }
     void ToggleRopeDebug()
@@ -395,20 +457,22 @@ public class RopeManager : MonoBehaviourPun
         foreach (Transform link in linkDisplay)
         {
             link.GetComponent<MeshRenderer>().enabled = debugRope;
+            //myRopeColor.gameObject.GetComponent<MeshRenderer>().enabled = !debugRope;
+            attachedRope.SetActive(!debugRope);
         }
     }
 
-        //Called from PlayerInput. PlayerInput sends the player's number so that we know who is pulling 
+    //Called from PlayerInput. PlayerInput sends the player's number so that we know who is pulling 
     public void InputFling(int playerNum)
     {
         if (!isRopeCut)                     // if rope is cut, tug should not work
         {
-            if (pullReady)
+            if (pullReady && (inAirFlings < maxAirFlings || nPlayersClamped > 0))
             {
                 pullReady = false;
                 pullTimer = pullTime;
 
-                if (playerNum == 1 || playerNum == 3)
+                if (playerNum % 2 == 1) // || playerNum == 3)
                 {
                     partnerNum = 0;
                     vibrationJoystick.Rumble(0, 0.4f, 0.3f);
@@ -420,25 +484,49 @@ public class RopeManager : MonoBehaviourPun
                 }
 
                 StartCoroutine(StrainFling(partnerNum, true));
-                /*if (!PhotonNetwork.OfflineMode && TeamManager.Instance.IsTeamSharedOnline(TeamNumber))
+                /*if (!PhotonNetwork.OfflineMode && TeamManager.Instance.IsTeamSharedOnline(TeamIndex))
                 {
                     Debug.Log("Online with two clients sharing this team");
                     
                     photonView.RPC("StrainFlingOnPartnerClientRPC", partnerRB[1 - partnerNum].GetComponent<PhotonView>().Owner, partnerNum);
                 }*/
+
+                inAirFlings++;
+
                 PlayWhipSound();
                 if (!PhotonNetwork.OfflineMode)
                 {
+                    if (TeamManager.Instance.IsTeamSharedOnline(TeamIndex))
+                    {
+                        photonView.RPC("InputFlingRPC", partnerRB[partnerNum].GetComponent<PhotonView>().Owner);
+                    }
+
                     photonView.RPC("PlayWhipSound", RpcTarget.Others);
                 }
             }
         }
     }
 
+    /// <summary>
+    /// To sync up InputFling variables that need to be synced up on a client sharing a team with this client
+    /// </summary>
+    [PunRPC]
+    private void InputFlingRPC()
+    {
+        // Debug.Log("Input fling sync");
+
+        pullReady = false;
+        pullTimer = pullTime;
+
+        inAirFlings++;
+    }
+
     [PunRPC]
     private void PlayWhipSound()
     {
-        whipSoundPlayer.EmitSound();
+        RuntimeManager.AttachInstanceToGameObject(whipSound, midConnectedBody.transform, midConnectedBody);
+        //whipSound.set3DAttributes(RuntimeUtils.To3DAttributes(midConnectedBody.transform));
+        whipSound.start();
     }
 
     [PunRPC]
@@ -446,8 +534,11 @@ public class RopeManager : MonoBehaviourPun
     {
         StartCoroutine(StrainFling(flingerIndex, false));
     }
+
     IEnumerator StrainFling (int flingerIndex, bool shouldCallFlingFunction)
     {
+        cameraShake.Shake(0.04f, 0.3f, 100);
+
         isStraining = true;
         //strainParticles[partnerNum].SetActive(true);
         StrainParticlesDisplayStatus(partnerNum, true);
@@ -455,27 +546,10 @@ public class RopeManager : MonoBehaviourPun
         {
             photonView.RPC("StrainParticlesDisplayStatus", RpcTarget.Others, partnerNum, true);
         }
-        characterSavedDrag = partnerRB[partnerNum].drag;
-        characterSavedAngularDrag = partnerRB[partnerNum].angularDrag;
 
-        /*foreach (Rigidbody body in partnerRB)
-        {
-            body.drag = characterStrainDrag;
-            body.angularDrag = characterStrainAngularDrag;
-        }*/
-        for (int i = 0; i < partnerRB.Length; i++)
-        {
-            SetPlayerRBDrag(i, characterStrainDrag, characterStrainAngularDrag);
-        }
-        linkSavedDrag = linkRBs[0].drag;
-        /*foreach (Rigidbody body in linkRBs)
-        {
-            body.drag = linkStrainDrag;
-        }*/
-        for (int i = 0; i < linkRBs.Length; i++)
-        {
-            SetLinkRBDrag(i, linkStrainDrag);
-        }
+        // Start drag change
+        teamDragManager.SetAllPlayerDrag(teamDragManager.CharacterStrainDrag, teamDragManager.CharacterStrainAngularDrag);
+        teamDragManager.SetAllLinksDrag(teamDragManager.LinkStrainDrag);
 
         anvilSavedDrag = anvil.drag;
         anvilSavedMass = anvil.mass;
@@ -493,23 +567,9 @@ public class RopeManager : MonoBehaviourPun
         partnerModelHolders[partnerNum].localRotation = Quaternion.identity;
         partnerModelHolders[partnerNum].localScale = Vector3.one;
 
-        /*foreach (Rigidbody body in partnerRB)
-        {
-            body.drag = characterSavedDrag;
-            body.angularDrag = characterSavedAngularDrag;
-        }*/
-        for (int i = 0; i < partnerRB.Length; i++)
-        {
-            SetPlayerRBDrag(i, characterSavedDrag, characterSavedAngularDrag);
-        }
-        /*foreach (Rigidbody body in linkRBs)
-        {
-            body.drag = linkSavedDrag;
-        }*/
-        for (int i = 0; i < linkRBs.Length; i++)
-        {
-            SetLinkRBDrag(i, linkSavedDrag);
-        }
+        // End drag change
+        teamDragManager.SetAllPlayerDrag(teamDragManager.CharacterDefaultDrag, teamDragManager.CharacterDefaultAngularDrag);
+        teamDragManager.SetAllLinksDrag(teamDragManager.LinkDefaultDrag);
 
         anvil.mass = anvilSavedMass;
         anvil.drag = anvilSavedDrag;
@@ -518,74 +578,6 @@ public class RopeManager : MonoBehaviourPun
         {
             ForceFling();
         }
-    }
-
-    /// <summary>
-    /// Sets the drag on a link rigidbody
-    /// </summary>
-    /// <param name="linkIndex">Index of link in linkRBs array</param>
-    /// <param name="drag">Drag to be set to link's RB</param>
-    private void SetLinkRBDrag(int linkIndex, float drag)
-    {
-        Rigidbody body = linkRBs[linkIndex];
-
-        if (!PhotonNetwork.OfflineMode && TeamManager.Instance.IsTeamSharedOnline(TeamNumber - 1))
-        {
-            // Stuff to do on all clients
-            photonView.RPC("SetLinkRBDragRPC", partnerRB[1 - partnerNum].GetComponent<PhotonView>().Owner, linkIndex, drag);
-        }
-
-        // Set drag on client's rigidbody in all scenarios
-        // We set RB's drag on both the owner and the partner client even in case of two clients in one team for consistency reasons
-        body.drag = drag;
-    }
-
-    /// <summary>
-    /// RPC for the SetLinkRBDrag() function
-    /// </summary>
-    /// <param name="linkIndex">Index of link in linkRBs array</param>
-    /// <param name="drag">Drag to be set to link's RB</param>
-    [PunRPC]
-    private void SetLinkRBDragRPC(int linkIndex, float drag)
-    {
-        Rigidbody body = linkRBs[linkIndex];
-        body.drag = drag;
-    }
-
-    /// <summary>
-    /// Sets the drag on a player rigidbody
-    /// </summary>
-    /// <param name="playerIndex">Index of player in partnerRB array</param>
-    /// <param name="drag">Drag value</param>
-    /// <param name="angularDrag">Angular drag value</param>
-    private void SetPlayerRBDrag(int playerIndex, float drag, float angularDrag)
-    {
-        Rigidbody body = partnerRB[playerIndex];
-
-        if (!PhotonNetwork.OfflineMode && TeamManager.Instance.IsTeamSharedOnline(TeamNumber - 1))
-        {
-            // Stuff to do on all clients
-            photonView.RPC("SetPlayerRBDragRPC", partnerRB[1 - partnerNum].GetComponent<PhotonView>().Owner, playerIndex, drag, angularDrag);
-        }
-
-        // Set drag on client's rigidbody in all scenarios
-        // We set RB's drag on both the owner and the partner client even in case of two clients in one team for consistency reasons
-        body.drag = drag;
-        body.angularDrag = angularDrag;
-    }
-
-    /// <summary>
-    /// RPC for the SetPlayerRBDrag() function
-    /// </summary>
-    /// <param name="playerIndex">Index of player in partnerRB array</param>
-    /// <param name="drag">Drag value</param>
-    /// <param name="angularDrag">Angular drag value</param>
-    [PunRPC]
-    private void SetPlayerRBDragRPC(int playerIndex, float drag, float angularDrag)
-    {
-        Rigidbody body = partnerRB[playerIndex];
-        body.drag = drag;
-        body.angularDrag = angularDrag;
     }
 
     [PunRPC]
@@ -620,8 +612,8 @@ public class RopeManager : MonoBehaviourPun
 
         /* ============ New way of handling direction ============ */
 
-        if (useNewFlingDirection)
-        {
+        //if (useNewFlingDirection)
+        //{
             Vector3 a = flinger.position - flung.position;      // flung -> flinger
             Vector3 b = midLink.transform.position - flung.position;   // flung -> midlink
 
@@ -645,23 +637,24 @@ public class RopeManager : MonoBehaviourPun
             dir = (rot * dir).normalized;
 
             Debug.DrawRay(flung.position, dir * 4f, Color.magenta, 1f, false);
-        }
-        else
-        {
-            // ============ Old way of handling direction ============ */
-            if (activeLink.position.y > (flung.transform.position.y + 0.15f) && partnerDistance > ropeLength)
-                dir = ((activeLink.position - flung.transform.position).normalized + Vector3.up).normalized;
+        //}
+        //else
+        //{
+        //    // ============ Old way of handling direction ============ */
+        //    if (activeLink.position.y > (flung.transform.position.y + 0.15f) && partnerDistance > ropeLength)
+        //        dir = ((activeLink.position - flung.transform.position).normalized + Vector3.up).normalized;
 
-            //otherwise, set the direction to be the direction between the two players
-            else
-                dir = (activeLink.position - flung.transform.position).normalized;
-        }
+        //    //otherwise, set the direction to be the direction between the two players
+        //    else
+        //        dir = (activeLink.position - flung.transform.position).normalized;
+        //}
 
         
         float distance = Vector3.Distance(links[6].transform.position, flung.transform.position);
 
 
         float forceMagnitude = tugCurve.Evaluate(distance);
+        forceMagnitude *= flingModifier;
 
         if (forceMagnitude > 650f)
         {
@@ -705,6 +698,32 @@ public class RopeManager : MonoBehaviourPun
         //Debug.DrawRay(partner.transform.position, dir, Color.cyan, 0.3f);
     }
 
+    public void ActivateBalloonsModifier(bool state)
+    {
+        if (state)
+        {
+            flingModifier = defaultFlingModifier + balloonFlingModifier;
+        }
+        else
+        {
+            flingModifier = defaultFlingModifier;
+        }
+    }
+    public void SetBalloonsModifier(bool state, float modifyFactor)
+    {
+        if (state)
+        {
+            flingModifier += (balloonFlingModifier * modifyFactor);
+        }
+        else
+        {
+            flingModifier -= (balloonFlingModifier * modifyFactor);
+        }
+
+        flingModifier = Mathf.Clamp(flingModifier, defaultFlingModifier, defaultFlingModifier + balloonFlingModifier);
+    }
+
+
     /// <summary>
     /// Fling a player's rigidbody at index flungIndex
     /// </summary>
@@ -713,16 +732,17 @@ public class RopeManager : MonoBehaviourPun
     private void FlingPlayerRB(int flungIndex, Vector3 forceToBeApplied) {
         Rigidbody flung = partnerRB[flungIndex];
 
-        if (!PhotonNetwork.OfflineMode && TeamManager.Instance.IsTeamSharedOnline(TeamNumber - 1))
-        {            
+        if (!PhotonNetwork.OfflineMode && TeamManager.Instance.IsTeamSharedOnline(TeamIndex))
+        {
             // Stuff to do on all clients
             photonView.RPC("FlingPlayerRBRPC", partnerRB[1 - partnerNum].GetComponent<PhotonView>().Owner, flungIndex, forceToBeApplied.x, forceToBeApplied.y, forceToBeApplied.z);
         }
-
-        // Add force on this client in all scenarios
-        // We fling the RB on both the owner and the partner client even in case of two clients in one team for consistency reasons
-        flung.AddForce(forceToBeApplied, ForceMode.Acceleration);
-        Debug.Log(flung.name + " is flung in this direction " + forceToBeApplied.ToString());
+        else
+        {
+            // Add force on this client in all scenarios
+            flung.AddForce(forceToBeApplied, ForceMode.Acceleration);
+            // Debug.Log(flung.name + " is flung in this direction " + forceToBeApplied.ToString());
+        }
     }
 
     /// <summary>
@@ -738,7 +758,7 @@ public class RopeManager : MonoBehaviourPun
         Vector3 thisForceToBeApplied = new Vector3(forceX, forceY, forceZ);
         flung.AddForce(thisForceToBeApplied, ForceMode.Acceleration);
 
-        Debug.Log(flung.name + " is flung in this direction " + thisForceToBeApplied.ToString());
+        // Debug.Log(flung.name + " is flung in this direction " + thisForceToBeApplied.ToString());
     }
 
     [PunRPC]
@@ -750,7 +770,10 @@ public class RopeManager : MonoBehaviourPun
     [PunRPC]
     private void OnPerfectFlingVisualsAndSound(int playerNum)
     {
-        flingSoundPlayer.EmitSound();
+        cameraShake.Shake(0.15f, 0.2f, 150);
+        RuntimeManager.AttachInstanceToGameObject(flingSound, partnerRB[playerNum].transform, partnerRB[playerNum]);
+        //flingSound.set3DAttributes(RuntimeUtils.To3DAttributes(midConnectedBody.transform));
+        flingSound.start();
         //Debug.Log(1 - partnerNum);
         perfectFling[playerNum].SetActive(true);
         perfectFling[playerNum].GetComponent<ParticleSystem>().Play();
@@ -823,11 +846,14 @@ public class RopeManager : MonoBehaviourPun
         {
             midLink.connectedBody = tempBody;
             attachedRope.SetActive(false);
+            springRope.SetActive(false);
             cutRope.SetActive(true);
 
             cutParticles.gameObject.transform.position = tempBody.position;
             cutParticles.Emit(200);
-            cutSoundPlayer.EmitSound();
+            RuntimeManager.AttachInstanceToGameObject(cutSound, midConnectedBody.transform, midConnectedBody);
+            //cutSound.set3DAttributes(RuntimeUtils.To3DAttributes(midConnectedBody.transform));
+            cutSound.start();
 
             linkRBs[linkRBs.Length / 2].AddForce(Vector3.up * 30f, ForceMode.Impulse);
             linkRBs[(linkRBs.Length / 2)-1].AddForce(Vector3.up * 30f, ForceMode.Impulse);
@@ -835,16 +861,64 @@ public class RopeManager : MonoBehaviourPun
         else
         {
             midLink.connectedBody = midConnectedBody;
-            attachedRope.SetActive(true);
             cutRope.SetActive(false);
+
+            if (isRopeSolid)
+            {
+                springRope.SetActive(true);
+            }
+            else
+            {
+                attachedRope.SetActive(true);
+            }
+        }
+    }
+    private void ShouldRopeFlashCheck()
+    {
+        if (!IsRopeCut && averageLinkDistance > 0.75f && (pullReady || isStraining) && !isRopeSolid) //should flash
+        {
+            if (!ropeIsFlashing)
+            {
+                ropeFlashLine.ToggleFlash(true);
+                ropeIsFlashing = true;
+                
+            }
+        }
+        //else if (IsRopeCut)
+        //{
+
+        //}
+        else
+        {
+            if (ropeIsFlashing)
+            {
+                ropeFlashLine.ToggleFlash(false);
+                ropeIsFlashing = false;
+            }
+        }
+    }
+
+    private void OnDestroy()
+    {
+        // Unubscribe resetting inAirFlings to 0 as soon as a RopeFlingResetTrigger is triggered
+        foreach (RopeFlingResetTrigger trigger in ropeFlingResetTriggers)
+        {
+            trigger.OnTrigger -= () => inAirFlings = 0;
+        }
+
+        for (int i = 0; i < 2; i++)
+        {
+            partnerPMs[i].OnGrounded -= () => inAirFlings = 0;
+            partnerPMs[i].OnPlayerClamp -= (t, p, c) => { nPlayersClamped++; };
+            partnerPMs[i].OnPlayerUnclamp -= (t, p) => { inAirFlings = 0; nPlayersClamped--; };
         }
     }
 
     /* --------------- Public functions accessible by other scripts */
 
-        /// <summary>
-        /// Nullifies all forces on the rope RigidBodies
-        /// </summary>
+    /// <summary>
+    /// Nullifies all forces on the rope RigidBodies
+    /// </summary>
     public void NullifyAllForces()
     {
         foreach (Rigidbody link in linkRBs)
@@ -853,7 +927,4 @@ public class RopeManager : MonoBehaviourPun
             link.angularVelocity = Vector3.zero;
         }
     }
-
-
 }
-

@@ -8,14 +8,14 @@ public class PlayerMovement : MonoBehaviourPun
     #region parameters
     //public AnimationCurve flingAngleCurve;
 
-    private int myTeam = 1;
+    private int teamIndex = 1;
     /// <summary>
     /// Team number of this player
     /// </summary>
-    public int MyTeam
+    public int TeamIndex
     {
-        get { return myTeam; }
-        set { myTeam = value; }
+        get { return teamIndex; }
+        set { teamIndex = value; }
     }
 
     public int playerNumber = 1;
@@ -29,45 +29,38 @@ public class PlayerMovement : MonoBehaviourPun
         set { playerNumber = value; }
     }
 
-    [Header("Speeds")]
-    private float groundMovementForce = 140f;
-    private float postJumpMovementForce = 60f;
-    private float airMovementForce = 100f;
+    [Header("Common Player Movement Data")]
+    [SerializeField] private PlayerMovementVariables playerMovementData;
+    private float groundMovementForce; // = 140f;
+    private float postJumpMovementForce; // = 60f;
+    private float airMovementForce; // = 100f;
 
-    [Header("Fall Curves")]
-    public AnimationCurve fallQuickCurve = AnimationCurve.Linear(0, 0, 1, -1000);
-    public AnimationCurve fallHighCurve = AnimationCurve.Linear(0, 0, 1, -1000);
+    private AnimationCurve fallQuickCurve = AnimationCurve.Linear(0, 0, 1, -1000);
+    private AnimationCurve fallHighCurve = AnimationCurve.Linear(0, 0, 1, -1000);
 
-    [Header("Masks")]
-    public LayerMask clampable;
-    public LayerMask badGrass;
-    public LayerMask jumpable;
+    private LayerMask clampable;
+    private LayerMask jumpable;
 
     [Header("AudioPlayers")]
-    public GenericSoundPlayer jumpSoundPlayer;
-    public GenericSoundPlayer clampSoundPlayer;
-    public GenericSoundPlayer deClampSoundPlayer;
+    FMOD.Studio.EventInstance jumpSoundEvent;
+    FMOD.Studio.EventInstance clampSoundEvent;
+    FMOD.Studio.EventInstance declampSoundEvent;
+
 
     [Header("Juice Controlers")]
     public SquashStretchController mySquashStretchController;
     public StickSphereController myStickSphereController;
+    public CameraShaker cameraShake;
 
     [Header("Other References")]
     public GameObject clampGraphic;
     public CameraLocator camLocator;
     public Transform midLink;
-    public SpringControl ourSpringControl;
     public ParticleSystem jumpPoofParticles;
-   
 
-    [HideInInspector]
     public Transform groundParticlePointer;
-    [HideInInspector]
     public ParticleVelocityControl groundParticleVelControl;
     private Vector3 groundParticleOffset = new Vector3(0f, -0.5f, 0f);
-
-
-    private bool isGrounded = false;
 
     //Bringing ApplyForce() back into this script periodically
     [Header("Apply Force Variables")]
@@ -80,7 +73,7 @@ public class PlayerMovement : MonoBehaviourPun
     {
         get { return partnerRB; }
     }
-    [HideInInspector] private bool inputting;
+    private bool inputting;
     private float ropeLength = 3f;
     private float maxRopeLength = 7f;
     private float elasticityConstant = 10f;
@@ -98,26 +91,31 @@ public class PlayerMovement : MonoBehaviourPun
     //private float slowGrassSpeed = 0.1f;
 
     //Jump Tweakable
-    private float initialJumpVelocity = 11f;
-    
-    private float jumpQuickTime = 0.15f;
-    private float jumpPeakTime = 0.65f;
+    private float initialJumpVelocity;
+
+    private float jumpQuickTime;
+    private float jumpPeakTime;
+    private float coyoteJumpTimer;
     //Jump Variables
     private bool jumping = false;
     private bool falling = false;
     private float jumpTimer = 0.0f;
     private float fallTimer = 0.0f;
     private float jumpGraphInterpolate = 0.0f;
+    private bool isGrounded = false;
+    private bool isWithinCoyoteJumpTime = false;
+    private float timeSinceUngrounded = 0f;
 
     private Rigidbody myRB;
 
     private bool clampSearch = false;
     private bool clamped = false;
     private bool inputtingClamp = false;
-    public bool IsClamped {
-        get{return clamped;}
+    public bool IsClamped
+    {
+        get { return clamped; }
     }
-    
+
 
     //groundcheck
     private Collider[] groundCollides;
@@ -134,7 +132,9 @@ public class PlayerMovement : MonoBehaviourPun
 
     //abillity stuff: springs
     private bool springActive = false;
-    private float springInitialJumpVelocity = 22f;
+    private bool balloonsActive = false;
+    private float springInitialJumpVelocity;
+    private float balloonsInitialJumpVelocity;
     private float saveInitialJumpVelocity;
 
     #endregion
@@ -143,17 +143,36 @@ public class PlayerMovement : MonoBehaviourPun
     // Use this for initialization
     void Start()
     {
+        // Setup player movement data
+        groundMovementForce = playerMovementData.GroundMovementForce;
+        postJumpMovementForce = playerMovementData.PostJumpMovementForce;
+        airMovementForce = playerMovementData.AirMovementForce;
+        fallHighCurve = playerMovementData.FallHighCurve;
+        fallQuickCurve = playerMovementData.FallQuickCurve;
+        clampable = playerMovementData.Clampable;
+        jumpable = playerMovementData.Jumpable;
+        initialJumpVelocity = playerMovementData.InitialJumpVelocity;
+        jumpQuickTime = playerMovementData.JumpQuickTime;
+        jumpPeakTime = playerMovementData.JumpPeakTime;
+        coyoteJumpTimer = playerMovementData.CoyoteJumpTimer;
+        springInitialJumpVelocity = playerMovementData.SpringInitialJumpVelocity;
+        balloonsInitialJumpVelocity = playerMovementData.BalloonsInitialJumpVelocity;
+
         myRB = GetComponent<Rigidbody>();
         myRB.maxAngularVelocity = 15f;
         speed = groundMovementForce;
         normalParent = transform.parent;
 
-        RaceManager.Instance.OnTeamRespawn += DestroyStickJointOnRespawn;
+        RaceManager.Instance.OnTeamRespawn += CheckClampOnRespawn;
 
         saveInitialJumpVelocity = initialJumpVelocity;
 
-        clampable |= (1 << LayerMask.NameToLayer("Clamp_" + myTeam.ToString() + playerNumber.ToString()));
-        clampable |= (1 << LayerMask.NameToLayer("Clamp_Team" + myTeam.ToString()));
+        clampable |= (1 << LayerMask.NameToLayer("Clamp_" + teamIndex.ToString() + playerNumber.ToString()));
+        clampable |= (1 << LayerMask.NameToLayer("Clamp_Team" + teamIndex.ToString()));
+
+        jumpSoundEvent = FMODUnity.RuntimeManager.CreateInstance(playerMovementData.JumpSoundEvent);
+        clampSoundEvent = FMODUnity.RuntimeManager.CreateInstance(playerMovementData.ClampSoundEvent);
+        declampSoundEvent = FMODUnity.RuntimeManager.CreateInstance(playerMovementData.DeclampSoundEvent);
     }
     #endregion
 
@@ -169,6 +188,18 @@ public class PlayerMovement : MonoBehaviourPun
 
         //CheckGrass();
         CheckGround();
+
+        if (!isGrounded && timeSinceUngrounded <= coyoteJumpTimer)
+        {
+            timeSinceUngrounded += Time.deltaTime;
+        }
+        else if (isGrounded && timeSinceUngrounded > coyoteJumpTimer)
+        {
+            timeSinceUngrounded = 0f;
+        }
+
+        isWithinCoyoteJumpTime = (timeSinceUngrounded <= coyoteJumpTimer) && !jumping ? true : false;
+
         newVel = myRB.velocity;
 
         if (clampSearch)
@@ -192,11 +223,41 @@ public class PlayerMovement : MonoBehaviourPun
 
                         if (stickJoint != null)     // if it already exists, first destroy it then create a new one!
                         {
-                            Destroy(stickJoint);
+                            if (PhotonNetwork.OfflineMode)
+                            {
+                                Destroy(stickJoint);
+                                stickJoint = null;
+                            }
+                            else
+                            {
+                                Destroy(stickJoint);
+                                stickJoint = null;
+                                photonView.RPC("DestroyStickJointRPC", RpcTarget.Others);
+                            }
                         }
-                        stickJoint = gameObject.AddComponent(typeof(FixedJoint)) as FixedJoint;
-                        stickJoint.connectedBody = rigidClampable;
-                        stickJoint.enableCollision = true;
+
+                        if (PhotonNetwork.OfflineMode)
+                        {
+                            SetClampJointOffline(rigidClampable);
+                        }
+                        else
+                        {
+                            PhotonView rigidbodyPhotonView = rigidClampable.GetComponent<PhotonView>();
+                            if (rigidbodyPhotonView != null)
+                            {
+                                SetClampJointOffline(rigidClampable);
+                                SetClampJointRPC(rigidbodyPhotonView.ViewID);
+                            }
+                            else
+                            {
+                                Debug.LogWarning("Custom warning, we are sticking to a rigidbody without a photonView");
+                                SetClampJointOffline(rigidClampable);
+                            }
+                        }
+
+                        // stickJoint = gameObject.AddComponent(typeof(FixedJoint)) as FixedJoint;
+                        // stickJoint.connectedBody = rigidClampable;
+                        // stickJoint.enableCollision = true;
 
                         rigidStick = true;
                         break;
@@ -204,8 +265,17 @@ public class PlayerMovement : MonoBehaviourPun
                 }
                 if (!rigidStick)
                 {
-                    myRB.isKinematic = true;
-                    myRB.useGravity = false;
+                    if (PhotonNetwork.OfflineMode)
+                    {
+                        SetClampJointOffline();
+                    }
+                    else
+                    {
+                        SetClampJointOffline();
+                        SetClampJointRPC(-2);
+                    }
+                    // myRB.isKinematic = true;
+                    // myRB.useGravity = false;
                 }
 
                 //myStickSphereController.StickSquash();
@@ -223,10 +293,16 @@ public class PlayerMovement : MonoBehaviourPun
                 clampSearch = false;
                 clamped = true;
 
-                if (OnPlayerClamp!=null)
+                if (OnPlayerClamp != null)
                 {
-                    OnPlayerClamp(myTeam, playerNumber, hitColliders[0].gameObject);
+                    OnPlayerClamp(teamIndex, playerNumber, hitColliders[0].gameObject);
                 }
+
+                // PhotonView pv = hitColliders[0].GetComponent<PhotonView>();
+                /*if (!PhotonNetwork.OfflineMode &&  pv != null)
+                {
+                    photonView.RPC("OnPlayerClampRPC", RpcTarget.Others, teamIndex, playerNumber, pv.ViewID);
+                }*/
             }
         }
         if (jumping)
@@ -260,6 +336,57 @@ public class PlayerMovement : MonoBehaviourPun
         }
     }
 
+    [PunRPC]
+    public void SetClampJointOnline(int stickJointID)
+    {
+        if (stickJointID == -2)
+        {
+            // Error check!
+            if (stickJoint != null)
+            {
+                Destroy(stickJoint);
+                stickJoint = null;
+            }
+            stickJoint = gameObject.AddComponent(typeof(FixedJoint)) as FixedJoint;
+        }
+        else
+        {
+            // Error check!
+            if (stickJoint != null)
+            {
+                Destroy(stickJoint);
+                stickJoint = null;
+            }
+            stickJoint = gameObject.AddComponent(typeof(FixedJoint)) as FixedJoint;
+            stickJoint.connectedBody = PhotonView.Find(stickJointID).gameObject.GetComponent<Rigidbody>();
+            stickJoint.enableCollision = true;
+        }
+    }
+
+    public void SetClampJointOffline(Rigidbody rigidClampable = null)
+    {
+        // Error check!
+        if (stickJoint != null)
+        {
+            Destroy(stickJoint);
+            stickJoint = null;
+        }
+        stickJoint = gameObject.AddComponent(typeof(FixedJoint)) as FixedJoint;
+        if (rigidClampable != null)
+        {
+            stickJoint.connectedBody = rigidClampable;
+            stickJoint.enableCollision = true;
+        }
+    }
+
+    public void SetClampJointRPC(int stickJointID)
+    {
+        if (!PhotonNetwork.OfflineMode)
+        {
+            photonView.RPC("SetClampJointOnline", RpcTarget.Others, stickJointID);
+        }
+    }
+
     #endregion
 
     #region FixedUpdate(Movement_Forces)
@@ -272,7 +399,7 @@ public class PlayerMovement : MonoBehaviourPun
         }
 
 
-        currLength = Vector3.Distance(myRB.transform.position, midLink.position)*2f;
+        currLength = Vector3.Distance(myRB.transform.position, midLink.position) * 2f;
 
         if (currLength > ropeLength && !isRopeCut)
         {
@@ -310,7 +437,7 @@ public class PlayerMovement : MonoBehaviourPun
         {
             if (!clampSearch)
             {
-                if (isGrounded)
+                if (/*isGrounded ||*/ isWithinCoyoteJumpTime)       // the isGrounded check is redundant. Since isWithinCoyoteJumpTime is also true in all cases when isGrounded is true, we can just use that as a way to reduce one check
                 {
                     Vector3 currentVelocity = myRB.velocity;
 
@@ -349,20 +476,26 @@ public class PlayerMovement : MonoBehaviourPun
     /// <summary>
     /// Use this function to display jumping visuals and sound effects
     /// </summary>
-    [PunRPC] private void JumpVisualsAndSound()
+    [PunRPC]
+    private void JumpVisualsAndSound()
     {
         mySquashStretchController.JumpSquash();
-        jumpSoundPlayer.EmitSound();
+        FMODUnity.RuntimeManager.AttachInstanceToGameObject(jumpSoundEvent, transform, myRB);
+        //jumpSoundEvent.set3DAttributes(FMODUnity.RuntimeUtils.To3DAttributes(transform));
+        jumpSoundEvent.start();
         jumpPoofParticles.transform.position = transform.position - new Vector3(0f, 0.4f, 0f);
         jumpPoofParticles.Emit(30);
     }
+
+    public delegate void OnClampInputDelegate();
+    public event OnClampInputDelegate OnClampInput;
 
     //Called from PlayerInput. down is true if ButtonDown, false if ButtonUp
     public void InputClamp(bool down)
     {
         if (down)
         {
-            clampSearch = true;
+            if (!clamped) clampSearch = true;
 
             //myStickSphereController.GrowSquash();
 
@@ -375,14 +508,19 @@ public class PlayerMovement : MonoBehaviourPun
             }
 
             inputtingClamp = true;
+
+            if (OnClampInput != null)
+            {
+                OnClampInput();
+            }
         }
         else
         {
             if (inputtingClamp)
             {
                 //myStickSphereController.ShrinkSquash();   // please don't move this to the Unclamp() function.
-                                                            // There is one specific instance when the sphere shouldn't shrink
-                                                            // This is when the player gets bumped by a bumper and stops holding down the clamp button
+                // There is one specific instance when the sphere shouldn't shrink
+                // This is when the player gets bumped by a bumper and stops holding down the clamp button
                 OnUnclampVisuals();
 
                 // Networked
@@ -394,7 +532,7 @@ public class PlayerMovement : MonoBehaviourPun
             inputtingClamp = false;
 
             Unclamp();
-            
+
         }
     }
 
@@ -415,7 +553,9 @@ public class PlayerMovement : MonoBehaviourPun
     private void OnClampVisualsAndSound()
     {
         myStickSphereController.StickSquash();
-        clampSoundPlayer.EmitSound();
+        FMODUnity.RuntimeManager.AttachInstanceToGameObject(clampSoundEvent, transform, myRB);
+        //clampSoundEvent.set3DAttributes(FMODUnity.RuntimeUtils.To3DAttributes(transform));
+        clampSoundEvent.start();
     }
 
     /// <summary>
@@ -433,7 +573,9 @@ public class PlayerMovement : MonoBehaviourPun
     [PunRPC]
     private void OnUnclampSound()
     {
-        deClampSoundPlayer.EmitSound();
+        FMODUnity.RuntimeManager.AttachInstanceToGameObject(declampSoundEvent, transform, myRB);
+        //declampSoundEvent.set3DAttributes(FMODUnity.RuntimeUtils.To3DAttributes(transform));
+        declampSoundEvent.start();
     }
     #endregion
     #endregion
@@ -481,6 +623,8 @@ public class PlayerMovement : MonoBehaviourPun
         }
     }
 
+    public delegate void GroundedDelegate();
+    public event GroundedDelegate OnGrounded;
     public void CheckGround()
     {
         /*
@@ -508,7 +652,9 @@ public class PlayerMovement : MonoBehaviourPun
         foreach (Collider collides in groundCollides)
         {
             if (collides.isTrigger)
+            {
                 triggerCount++;
+            }
         }
 
         if (groundCollides.Length - triggerCount > 1) //Did the overlap check find anything? If it is only 1 then it only collided with the current player.
@@ -516,6 +662,11 @@ public class PlayerMovement : MonoBehaviourPun
             isGrounded = true;
             speed = groundMovementForce;
             angularSpeed = 100f;
+
+            if (OnGrounded != null)
+            {
+                OnGrounded();
+            }
         }
         else
         {
@@ -531,7 +682,11 @@ public class PlayerMovement : MonoBehaviourPun
                 angularSpeed = 10f;
             }
         }
-        UpdateGroundParticles(isGrounded);
+
+        if (groundParticlePointer != null)
+        {
+            UpdateGroundParticles(isGrounded);
+        }
     }
 
     private void UpdateGroundParticles(bool onGround)
@@ -552,7 +707,7 @@ public class PlayerMovement : MonoBehaviourPun
         else
         {
             groundParticleVelControl.UpdateEmission(0f);
-        } 
+        }
     }
 
     //Takes how long the player held down the jump for and outputs a 0.0 - 1.0 value so that we can lerp between the two fall graphs.
@@ -587,10 +742,21 @@ public class PlayerMovement : MonoBehaviourPun
                 //transform.parent = normalParent;
                 //myRB.AddForce(parentVelocity, ForceMode.VelocityChange);
                 //stickJoint.connectedBody = null;
-                Destroy(stickJoint);
+                if (PhotonNetwork.OfflineMode)
+                {
+                    Destroy(stickJoint);
+                    stickJoint = null;
+                }
+                else
+                {
+                    Destroy(stickJoint);
+                    stickJoint = null;
+                    photonView.RPC("DestroyStickJointRPC", RpcTarget.Others);
+                }
             }
             else
             {
+                Debug.LogError("Custom error, this shouldn't run lol (stickJoint should always be set to something now)");
                 myRB.isKinematic = false;
                 myRB.useGravity = true;
             }
@@ -607,22 +773,51 @@ public class PlayerMovement : MonoBehaviourPun
 
             if (OnPlayerUnclamp != null)
             {
-                OnPlayerUnclamp(MyTeam, playerNumber);
+                OnPlayerUnclamp(teamIndex, playerNumber);
             }
+
+            /*if (!PhotonNetwork.OfflineMode)
+            {
+                photonView.RPC("OnPlayerUnclampRPC", RpcTarget.Others, teamIndex, playerNumber);
+            }*/
+        }
+    }
+
+    [PunRPC]
+    public void DestroyStickJointRPC()
+    {
+        if (stickJoint != null)
+        {
+            Destroy(stickJoint);
+            stickJoint = null;
         }
     }
 
     /// <summary>
-    /// Use this function for destroying the stick joint.
+    /// Checks to see if the player is clamping while respawning, and if they are, unclamps them while maintaining clamp input so that after respawn the player can stick again
     /// </summary>
-    void DestroyStickJointOnRespawn(int teamNumber)
+    void CheckClampOnRespawn(int teamNumber)
     {
-        if (teamNumber == myTeam)
+        if (teamNumber == teamIndex)
         {
-            if (stickJoint != null)
+            if (clamped)
             {
-                Destroy(stickJoint);
+                UnclampThenStartClampSearch();
             }
+            //if (stickJoint != null)
+            //{
+            //    if (PhotonNetwork.OfflineMode)
+            //    {
+            //        Destroy(stickJoint);
+            //        stickJoint = null;
+            //    }
+            //    else
+            //    {
+            //        Destroy(stickJoint);
+            //        stickJoint = null;
+            //        photonView.RPC("DestroyStickJointRPC", RpcTarget.Others);
+            //    }
+            //}
         }
     }
 
@@ -645,6 +840,7 @@ public class PlayerMovement : MonoBehaviourPun
         }
 
         myRB.AddForce(force, forceMode);
+        cameraShake.Shake(0.10f, 0.2f, 150);
 
         if (pauseInput)
         {
@@ -685,7 +881,7 @@ public class PlayerMovement : MonoBehaviourPun
     private IEnumerator StartClampSearchInSeconds(float t)
     {
         yield return new WaitForSeconds(t);
-        
+
         // If still holding down clamp button, start searching for clampable surfaces again
         if (inputtingClamp)
         {
@@ -723,6 +919,32 @@ public class PlayerMovement : MonoBehaviourPun
     /// Subscribe to this to get info on which team/player clamps from the subscribed object
     /// </summary>
     public event OnPlayerUnclampDelegate OnPlayerUnclamp;
+
+    #region RPCs
+    /*[PunRPC]
+    public void OnPlayerClampRPC(int teamNum, int playerNum, int GOID)
+    {
+        if (OnPlayerClamp != null)
+        {
+            GameObject go = PhotonView.Find(GOID).gameObject;
+
+            if (go != null)
+            {
+                OnPlayerClamp(teamNum, playerNum, go);
+            }
+        }
+    }
+
+    [PunRPC]
+    public void OnPlayerUnclampRPC(int teamNum, int playerNum)
+    {
+        if (OnPlayerUnclamp != null)
+        {
+            OnPlayerUnclamp(teamNum, playerNum);
+        }
+    }*/
+    #endregion
+
     #endregion
 
     #region Getters_And_Setters
@@ -746,6 +968,7 @@ public class PlayerMovement : MonoBehaviourPun
     {
         isRopeCut = cut;
     }
+
     public void ChangeSpringStatus(bool toggle)
     {
         if (toggle)
@@ -754,6 +977,36 @@ public class PlayerMovement : MonoBehaviourPun
             initialJumpVelocity = saveInitialJumpVelocity;
 
         springActive = toggle;
+    }
+
+    public void ChangeBalloonsStatus(bool toggle)
+    {
+
+        if (toggle)
+        {
+            initialJumpVelocity = balloonsInitialJumpVelocity;
+        }
+        else
+        {
+            initialJumpVelocity = saveInitialJumpVelocity;
+        }
+        balloonsActive = toggle;
+    }
+
+    public void SetBalloonModifier(bool toggle, float modifyFactor)
+    {
+        float modifierDiff = balloonsInitialJumpVelocity - saveInitialJumpVelocity;
+
+        if (toggle)
+        {
+            initialJumpVelocity += modifierDiff * modifyFactor;
+        }
+        else
+        {
+            initialJumpVelocity -= modifierDiff * modifyFactor;
+        }
+
+        initialJumpVelocity = Mathf.Clamp(initialJumpVelocity, saveInitialJumpVelocity, balloonsInitialJumpVelocity);
     }
 
     /// <summary>
@@ -784,7 +1037,7 @@ public class PlayerMovement : MonoBehaviourPun
     /// </summary>
     void OnDestroy()
     {
-        RaceManager.Instance.OnTeamRespawn -= DestroyStickJointOnRespawn;
+        RaceManager.Instance.OnTeamRespawn -= CheckClampOnRespawn;
     }
 
     #region Gizmos_And_Debugging
@@ -792,7 +1045,7 @@ public class PlayerMovement : MonoBehaviourPun
     /*
     void OnDrawGizmos()
     {
-        if (myTeam != 1)
+        if (teamIndex != 1)
             return;
 
         if (GetComponent<PlayerInput>().PlayerNumber != 1)

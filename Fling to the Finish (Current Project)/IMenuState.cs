@@ -34,6 +34,14 @@ namespace Menus
         /// </summary>
         void ActivateState();
         /// <summary>
+        /// Is called when we know this is no longer the active state
+        /// </summary>
+        void DeactivateState();
+        /// <summary>
+        /// Called when the camera starts overshooting beyond the final camera position of this state.
+        /// </summary>
+        void StateScreenTransitionFinish();
+        /// <summary>
         /// Takes horizontal input for moving the snail
         /// </summary>
         /// <param name="horizontalInput">Horizontal input value</param>
