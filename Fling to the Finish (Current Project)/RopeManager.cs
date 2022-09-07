@@ -1,17 +1,13 @@
-﻿using System.Collections;
-using System.Collections.Generic;
-using UnityEngine;
-using Photon.Pun;
+﻿using Fling.Achievements;
 using FMODUnity;
+using Photon.Pun;
+using System.Collections;
+using UnityEngine;
 
 public class RopeManager : MonoBehaviourPun
 {
 
     [Header("Rope Adjustments")]
-    public float ropeLength = 3f;
-    public float maxRopeLength = 7f;
-    public float elasticityConstant = 10f;
-    public float pullConstant = 35f;
     public AnimationCurve tugCurve = AnimationCurve.Linear(0f,0f,6.00f,900f);
 
     private ConfigurableJoint[] linkJoints;
@@ -58,6 +54,7 @@ public class RopeManager : MonoBehaviourPun
     public GameObject attachedRope;
     public GameObject springRope;
     public GameObject cutRope;
+    [SerializeField] private XrayRope xrayRope;
     private bool isRopeCut;
     /// <summary>
     /// The current joined/cut status of the rope
@@ -113,14 +110,83 @@ public class RopeManager : MonoBehaviourPun
     private float anvilSavedDrag;
     private float anvilStrainMass = 2f;
     private float anvilStrainDrag = 5f;
+    private float anvilStrainForce = 125f;
+    private float savedLinkMass = 0.54f;
 
     private bool debugRope = false;
 
     //public bool useNewFlingDirection = true;
     public AnimationCurve flingDirectionAngleCurve;
 
-    private bool isRopeSolid = false;
+    [Header("LimitHelicoptering")]
+    public bool limitHelicopteringViaVelocity = true;
+    public float currentLinkDistance = 0f;
+    public float currentVelocity = 0f;
+    public float minLinkDistance = 2f;
+    public float maxLinkDistance = 5f;
+    public float minClampVelocity = 10f;
+    public float maxClampVelocity = 1f;
+
+    public bool limitHelicopteringViaDrag = true;
+    public float differenceMagnitude = 0f;
+    public float highestDifferenceMagnitude = 0f;
+    public float antiFactor = 0f;
+    public float highestAntiFactor = 0f;
+    public float minDifference = 25f;
+    public float maxDifference = 100f;
+    public float minAntiFactor = 0.25f;
+    public float maxAntiFactor = 1f;
+
+    public bool limitViaDifferenceBank = true;
+    public float differenceBank = 0f;
+    public float bankFactor = 0f;
+    public float differenceThreshold = 10f;
+    public float bankLossRate = 20f;
+    public float minDifferenceBank = 300f;
+    public float maxDifferenceBank = 800f; 
+    public float minBankFactor = 0.01f;
+    public float maxBankFactor = 0.9f;
+
+    public bool lerpHelicopteringViaPing = true;
+    public bool sharingOnline = false;
+    public float pingBankLerpValue = 0.5f;
+    public float pingDragLerpValue = 0.5f;
+    public float minPing = 30f;
+    public float maxPing = 150f;
+    public float minBankLerp = 0.5f;
+    public float maxBankLerp = 1f;
+    public float minDragLerp = 0.1f;
+    public float maxDragLerp = 1f;
+
+
+    public bool IsRopeSolid { get; private set; } = false;
     private float solidSpringForce = 100f;
+
+    private float ropeLerpAmount = 0.1f;
+    private float ropeLerpAmountMin = 0.1f;
+    private float ropeLerpAmountMax = 0.95f;
+    private float[] ropeLerpArray = new float[15];
+    private float leftLerpValue = 0.95f;
+    private float rightLerpValue = 0.95f;
+    private Vector3[] currentRopePositions = new Vector3[15];
+    private Vector3[] ropePositions = new Vector3[15];
+    private Vector3[] previousRopePositions = new Vector3[15];
+    private Quaternion[] currentRopeRotations = new Quaternion[15];
+    private Quaternion[] ropeRotations = new Quaternion[15];
+    private Quaternion[] previousRopeRotations = new Quaternion[15];
+    private bool isRespawningDontSmooth = false;
+
+
+    private bool isRopeEnabled = true;
+    private bool hasInitialized = false;
+    
+    // gameplay type
+    private CharacterContent.TeamInstanceType gameplayType = CharacterContent.TeamInstanceType.Gameplay;
+    public void SetGameplayType(CharacterContent.TeamInstanceType gameplayType)
+    {
+        this.gameplayType = gameplayType;
+        InitSharingOnlineValue();
+    }
 
     void Awake()
     {
@@ -128,10 +194,11 @@ public class RopeManager : MonoBehaviourPun
         int mid = links.Length / 2;
         midLink = links[mid].GetComponent<ConfigurableJoint>();
         midConnectedBody = links[mid - 1].GetComponent<Rigidbody>();
+        savedLinkMass = links[1].GetComponent<Rigidbody>().mass;
     }
 
     // Use this for initialization
-    void Start()
+    public void Init()
     {
         // Game starts with the rope connected
         attachedRope.SetActive(true);
@@ -206,6 +273,14 @@ public class RopeManager : MonoBehaviourPun
         whipSound = RuntimeManager.CreateInstance(whipSoundEventPath);
         flingSound = RuntimeManager.CreateInstance(flingSoundEventPath);
         cutSound = RuntimeManager.CreateInstance(cutSoundEventPath);
+
+        IniPreviousRopePositions();
+        IniRopeLerpArray();
+        StartCoroutine(WaitThenCheckOwnership());
+        InitSharingOnlineValue();
+        ShouldRopeFlashCheck();
+
+        hasInitialized = true;
     }
 
     private void LateStart()
@@ -223,8 +298,36 @@ public class RopeManager : MonoBehaviourPun
         }
     }
 
+    IEnumerator WaitThenCheckOwnership()
+    {
+        yield return new WaitForSeconds(3f);
+
+        CheckOwnership();
+    }
+
+    public void CheckOwnership(/*bool isLeftPlayerMine, bool isRightPlayerMine*/)
+    {
+        //if (!isLeftPlayerMine)
+        if (PhotonNetwork.InRoom && !partnerRB[0].gameObject.GetComponent<PhotonView>().IsMine)
+        {
+            leftLerpValue = ropeLerpAmountMin;
+        }
+        //else if (!isRightPlayerMine)
+        if (PhotonNetwork.InRoom && !partnerRB[1].gameObject.GetComponent<PhotonView>().IsMine)
+        {
+            rightLerpValue = ropeLerpAmountMin;
+        }
+
+        IniRopeLerpArray();
+    }
+
     private void Update()
     {
+        if (!isRopeEnabled || !hasInitialized)
+        { 
+            return;
+        }
+
         if (DevScript.Instance.DevMode)
         {
             if (Input.GetKeyUp("r"))
@@ -244,102 +347,157 @@ public class RopeManager : MonoBehaviourPun
                 pullReady = true;
         }
 
-        averageLinkDistance = (Vector3.Distance(links[2].position, links[4].position) + Vector3.Distance(links[8].position, links[10].position)) / 2.0f;
+        averageLinkDistance = (Vector3.Distance(ropePositions[3], ropePositions[5]) + Vector3.Distance(ropePositions[9], ropePositions[11])) / 2.0f;
 
         myRopeColor.UpdateRopeColor(averageLinkDistance);
         UpdateLinkColliders(averageLinkDistance);
 
+        ShouldRopeFlashCheck();
+    }
+
+    private void LateUpdate()
+    {
+        if (!isRopeEnabled || !hasInitialized)
+        {
+            return;
+        }
+
+        UpdateLerpedRopePositions();
+
         if (isRopeCut)
             UpdateCutRopeJoints();
-        else if (isRopeSolid)
+        else if (IsRopeSolid)
             UpdateSpringRopeJoints();
         else
             UpdateRopeJoints();
 
-        ShouldRopeFlashCheck();
+        
+    }
+
+    void InitSharingOnlineValue()
+    {
+        if (lerpHelicopteringViaPing)
+        {
+            sharingOnline = (gameplayType == CharacterContent.TeamInstanceType.Gameplay
+                && !PhotonNetwork.OfflineMode
+                && TeamManager.Instance != null
+                && TeamManager.Instance.IsTeamSharedOnline(TeamIndex));
+        }
+    }
+
+    void IniRopeLerpArray()
+    {
+        for (int i = 0; i < ropeLerpArray.Length; i++)
+        {
+            float inverseLerp = Mathf.InverseLerp(0, ropeLerpArray.Length-1, i);
+            ropeLerpArray[i] = Mathf.Lerp(leftLerpValue, rightLerpValue, inverseLerp);
+        }
+    }
+    void IniPreviousRopePositions()
+    {
+        for (int i = 0; i < ropePositions.Length; i++)
+        {
+            ropePositions[i] = ropeJoints[i].position;
+            previousRopePositions[i] = ropeJoints[i].position;
+            currentRopePositions[i] = ropeJoints[i].position;
+
+            ropeRotations[i] = ropeJoints[i].rotation;
+            previousRopeRotations[i] = ropeJoints[i].rotation;
+            currentRopeRotations[i] = ropeJoints[i].rotation;
+
+            if (i == 0)
+            {
+                previousRopePositions[i] = partnerRB[0].transform.position;
+                previousRopeRotations[i]= Quaternion.LookRotation(links[0].transform.position - partnerRB[0].transform.position);
+            }
+            else if (i < ropeJoints.Length - 2)
+            {
+                previousRopePositions[i] = links[i - 1].transform.position;
+                previousRopeRotations[i]= Quaternion.LookRotation(links[i].transform.position - links[i - 1].transform.position);
+            }
+            else if (i < ropeJoints.Length - 1)
+            {
+                previousRopePositions[i] = links[i - 1].transform.position;
+                previousRopeRotations[i] = Quaternion.LookRotation(partnerRB[1].transform.position - links[i - 1].transform.position);
+            }
+            else
+            {
+                previousRopePositions[i] = partnerRB[1].transform.position;
+                previousRopeRotations[i] = ropeJoints[i - 1].rotation;
+            }
+        }
+    }
+
+    void UpdateLerpedRopePositions()
+    {
+        for (int i = 0; i < ropePositions.Length; i++)
+        {
+            if (i == 0)
+            {
+                ropePositions[i] = partnerRB[0].transform.position;
+                ropeRotations[i] = Quaternion.LookRotation(links[0].transform.position - partnerRB[0].transform.position);
+            }
+            else if (i < ropeJoints.Length - 2)
+            {
+                ropePositions[i] = links[i - 1].transform.position;
+                ropeRotations[i] = Quaternion.LookRotation(links[i].transform.position - links[i - 1].transform.position);
+            }
+            else if (i < ropeJoints.Length - 1)
+            {
+                ropePositions[i] = links[i - 1].transform.position;
+                ropeRotations[i] = Quaternion.LookRotation(partnerRB[1].transform.position - links[i - 1].transform.position);
+            }
+            else
+            {
+                ropePositions[i] = partnerRB[1].transform.position;
+                ropeRotations[i] = ropeJoints[i - 1].rotation;
+            }
+        }
+
+        for (int i = 0; i < ropePositions.Length; i++)
+        {
+            if (isRespawningDontSmooth)
+            {
+                currentRopePositions[i] = ropePositions[i];
+                currentRopeRotations[i] = ropeRotations[i];
+            }
+            else
+            {
+                currentRopePositions[i] = Vector3.Lerp(previousRopePositions[i], ropePositions[i], ropeLerpArray[i]);
+                currentRopeRotations[i] = Quaternion.Lerp(previousRopeRotations[i], ropeRotations[i], ropeLerpArray[i]);
+            }
+            
+
+            previousRopePositions[i]= currentRopePositions[i];
+            previousRopeRotations[i]= currentRopeRotations[i];
+        }
     }
 
     void UpdateRopeJoints()
     {
         for (int i = 0; i < ropeJoints.Length; i++)
         {
-
-            if (i == 0)
-            {
-                ropeJoints[i].position = partnerRB[0].transform.position;
-                ropeJoints[i].LookAt(links[0].transform.position);
-            }
-            else if (i < ropeJoints.Length - 2)
-            {
-                ropeJoints[i].position = links[i-1].transform.position;
-                ropeJoints[i].LookAt(links[i].transform.position);
-            }
-            else if (i < ropeJoints.Length - 1)
-            {
-                ropeJoints[i].position = links[i - 1].transform.position;
-                ropeJoints[i].LookAt(partnerRB[1].transform.position);
-            }
-            else
-            {
-                ropeJoints[i].position = partnerRB[1].transform.position;
-                ropeJoints[i].rotation = ropeJoints[i - 1].rotation;
-            }
+            ropeJoints[i].position = currentRopePositions[i];
+            ropeJoints[i].rotation = currentRopeRotations[i];
         }
     }
     void UpdateSpringRopeJoints()
     {
         for (int i = 0; i < ropeJoints.Length; i++)
         {
-
-            if (i == 0)
-            {
-                springRopeJoints[i].position = partnerRB[0].transform.position;
-                springRopeJoints[i].LookAt(links[0].transform.position);
-            }
-            else if (i < ropeJoints.Length - 2)
-            {
-                springRopeJoints[i].position = links[i - 1].transform.position;
-                springRopeJoints[i].LookAt(links[i].transform.position);
-            }
-            else if (i < ropeJoints.Length - 1)
-            {
-                springRopeJoints[i].position = links[i - 1].transform.position;
-                springRopeJoints[i].LookAt(partnerRB[1].transform.position);
-            }
-            else
-            {
-                springRopeJoints[i].position = partnerRB[1].transform.position;
-                springRopeJoints[i].rotation = ropeJoints[i - 1].rotation;
-            }
+            springRopeJoints[i].position = currentRopePositions[i];
+            springRopeJoints[i].rotation = currentRopeRotations[i];
         }
     }
     void UpdateCutRopeJoints()
     {
         for (int i = 0; i < cutJoints.Length; i++)
         {
-
-            if (i == 0)
-            {
-                cutJoints[i].position = partnerRB[0].transform.position;
-                cutJoints[i].LookAt(links[0].transform.position);
-            }
-            else if (i < ropeJoints.Length - 2)
-            {
-                cutJoints[i].position = links[i - 1].transform.position;
-                cutJoints[i].LookAt(links[i].transform.position);
-            }
-            else if (i < ropeJoints.Length - 1)
-            {
-                cutJoints[i].position = links[i - 1].transform.position;
-                cutJoints[i].LookAt(partnerRB[1].transform.position);
-            }
-            else
-            {
-                cutJoints[i].position = partnerRB[1].transform.position;
-                cutJoints[i].rotation = cutJoints[i - 1].rotation;
-            }
+            cutJoints[i].position = currentRopePositions[i];
+            cutJoints[i].rotation = currentRopeRotations[i];
         }
     } 
+
     void UpdateLinkColliders(float distance)
     {
         
@@ -359,20 +517,36 @@ public class RopeManager : MonoBehaviourPun
         for (int i = 0; i < links.Length; i++)
         {
             linkColliders[i].height = newHeight;
-            linkDisplay[i].localScale = new Vector3(0.29f, newHeight / 2f, 0.29f);
+            linkDisplay[i].localScale = new Vector3(0.5f/3f, newHeight / 2f/3f, 0.5f/3f);
+        }   
+    }
+
+    public void SetLinkMasses(float weight)
+    {
+        for (int i = 0; i < links.Length; i++)
+        {
+            links[i].GetComponent<Rigidbody>().mass = weight;
         }
-        
+    }
+    public void ReturnLinkMassesToNormal()
+    {
+        SetLinkMasses(savedLinkMass);
     }
 
     // Update is called once per frame
     void FixedUpdate()
     {
+        if (!hasInitialized)
+        {
+            return;
+        }
+
         // make the temporary rigidbody follow the midlink if the rope is connected
         if (!isRopeCut)
         {
             tempBody.transform.position = midLink.transform.position;
 
-            if (isRopeSolid)
+            if (IsRopeSolid)
             {
                 /*
                 Vector3 midPoint = (partnerRB[0].transform.position + partnerRB[1].transform.position) / 2f;
@@ -392,58 +566,127 @@ public class RopeManager : MonoBehaviourPun
                 }
 
             }
+            if (lerpHelicopteringViaPing)
+            {
+                if (sharingOnline)
+                {
+                    float inverseLerp = Mathf.InverseLerp(minPing, maxPing, PhotonNetwork.GetPing());
+                    pingBankLerpValue = Mathf.Lerp(minBankLerp, maxBankLerp, inverseLerp);
+                    pingDragLerpValue = Mathf.Lerp(minDragLerp, maxDragLerp, inverseLerp);
+                }
+                else
+                {
+                    pingBankLerpValue = minBankLerp;
+                    pingDragLerpValue = minDragLerp;
+                }
+            }
+            if (limitHelicopteringViaVelocity)
+            {
+                currentLinkDistance = averageLinkDistance;
+                currentVelocity = partnerRB[0].velocity.magnitude;
+                if (averageLinkDistance > 2f)
+                {
+                    float inverseLerp = Mathf.InverseLerp(minLinkDistance, maxLinkDistance, averageLinkDistance);
+                    float maxVelocity = Mathf.Lerp (minClampVelocity, maxClampVelocity, inverseLerp);
+
+                    foreach (Rigidbody rb in partnerRB){
+                        if (rb.velocity.magnitude > maxVelocity){
+                            rb.velocity = rb.velocity.normalized * maxVelocity;
+                        } 
+                    }
+                    foreach (Rigidbody rb in linkRBs){
+                        if (rb.velocity.magnitude > maxVelocity){
+                            rb.velocity = rb.velocity.normalized * maxVelocity;
+                        } 
+                    }
+                }
+            }
+            if (true)
+            {
+                differenceMagnitude = (partnerRB[0].velocity - partnerRB[1].velocity).magnitude;
+
+                Vector3 antiZeroVector = partnerRB[0].velocity - partnerRB[1].velocity;
+                Vector3 antiOneVector = partnerRB[1].velocity - partnerRB[0].velocity;
+
+                if (differenceMagnitude > highestDifferenceMagnitude){
+                    highestDifferenceMagnitude = differenceMagnitude;
+                }
+
+                if (differenceMagnitude > minDifference)
+                {
+                    float inverseLerp = Mathf.InverseLerp(minDifference, maxDifference, differenceMagnitude);
+                    antiFactor = Mathf.Lerp (minAntiFactor, maxAntiFactor, inverseLerp);
+ 
+                    if (limitHelicopteringViaDrag)
+                    {
+                        partnerRB[0].velocity = partnerRB[0].velocity - (antiZeroVector * antiFactor * pingDragLerpValue);
+                        partnerRB[1].velocity = partnerRB[1].velocity - (antiOneVector * antiFactor);
+                    }
+                }
+
+                if (differenceMagnitude > differenceThreshold){
+                    differenceBank += differenceMagnitude * pingBankLerpValue;
+                }
+                else{
+                    differenceBank -= bankLossRate;
+                }
+
+                if (differenceBank > minDifferenceBank){
+                    float inverseLerp = Mathf.InverseLerp(minDifferenceBank, maxDifferenceBank, differenceBank * pingBankLerpValue);
+                    bankFactor = Mathf.Lerp (minBankFactor, maxBankFactor, inverseLerp);
+
+                    if (limitViaDifferenceBank)
+                    {
+                        partnerRB[0].velocity = partnerRB[0].velocity - (antiZeroVector * bankFactor);
+                        partnerRB[1].velocity = partnerRB[1].velocity - (antiOneVector * bankFactor);
+                    }
+                }
+
+                if (antiFactor > highestAntiFactor){
+                    highestAntiFactor = antiFactor;
+                }
+
+
+                if (differenceMagnitude < 0.1){
+                    differenceMagnitude = 0f;
+                    highestDifferenceMagnitude = 0f;
+                    antiFactor = 0f;
+                    highestAntiFactor = 0f;
+                } 
+                if (differenceBank < 0f){
+                    differenceBank = 0f;
+                }
+            }
         }
 
         if (isStraining)
         {
-            for (int i = 0; i < linkRBs.Length; i++)
-            {
-                Rigidbody body = linkRBs[i];
-                FlingLinkRBAtIndex(i);
-            }
-            
-            anvil.AddForce(Vector3.up * 100f, ForceMode.Force);
-
-            partnerModelHolders[partnerNum].localRotation = Quaternion.identity;
-            partnerModelHolders[partnerNum].Rotate(new Vector3(Random.Range(-strainShakeRot, strainShakeRot), Random.Range(-strainShakeRot, strainShakeRot), Random.Range(-strainShakeRot, strainShakeRot)));
-            partnerModelHolders[partnerNum].localScale = new Vector3(1.00f + Random.Range(-strainShakeScale, strainShakeScale), 1.00f + Random.Range(-strainShakeScale, strainShakeScale), 1.00f + Random.Range(-strainShakeScale, strainShakeScale));
+            if (PhotonNetwork.OfflineMode)
+                FlingStrainingRPC(partnerNum);
+            else
+                photonView.RPC("FlingStrainingRPC", RpcTarget.All, partnerNum);
         }
-    }
-
-    /// <summary>
-    /// Flings a link's Rigidbody at index (the rigidbody is grabbed from the linkRBs array)
-    /// </summary>
-    /// <param name="linkIndex">Index of the rigidbody to be flung</param>
-    private void FlingLinkRBAtIndex(int linkIndex) {
         
-        Rigidbody body = linkRBs[linkIndex];
-        if (!PhotonNetwork.OfflineMode && !body.GetComponent<PhotonView>().IsMine)
-        {
-            // Stuff to do on all clients
-            photonView.RPC("FlingLinkRBAtIndexRPC", linkRBs[linkIndex].GetComponent<PhotonView>().Owner, linkIndex);
-        }
-        else
-        {
-            // Fling this client's rigidbody in all scenarios
-            // We fling the RB on both the owner and the partner client even in case of two clients in one team for consistency reasons
-            body.AddForce(Vector3.up * 30f, ForceMode.Force);
-        }
     }
 
-    /// <summary>
-    /// RPC for the FlingLinkRBAtIndex() function.
-    /// </summary>
-    /// <param name="linkIndex"></param>
     [PunRPC]
-    private void FlingLinkRBAtIndexRPC(int linkIndex) {
+    private void FlingStrainingRPC(int networkPartnerNum)
+    {
+        for (int i = 0; i < linkRBs.Length; i++)
+        {
+            linkRBs[i].AddForce(Vector3.up * 30f, ForceMode.Force); ;
+        }
 
-        Rigidbody body = linkRBs[linkIndex];
-        body.AddForce(Vector3.up * 30f, ForceMode.Force);
+        anvil.AddForce(Vector3.up * anvilStrainForce, ForceMode.Force);
+
+        partnerModelHolders[networkPartnerNum].localRotation = Quaternion.identity;
+        partnerModelHolders[networkPartnerNum].Rotate(new Vector3(Random.Range(-strainShakeRot, strainShakeRot), Random.Range(-strainShakeRot, strainShakeRot), Random.Range(-strainShakeRot, strainShakeRot)));
+        partnerModelHolders[networkPartnerNum].localScale = new Vector3(1.00f + Random.Range(-strainShakeScale, strainShakeScale), 1.00f + Random.Range(-strainShakeScale, strainShakeScale), 1.00f + Random.Range(-strainShakeScale, strainShakeScale));
     }
 
-    public void MakeRopeSolid(bool state)
+	public void MakeRopeSolid(bool state)
     {
-        isRopeSolid = state;
+		IsRopeSolid = state;
         PoofPooler.Instance.SpawnFromPool("SpherePoof", midLink.transform.position, 40);
         //myRopeColor.SetRopeMaterialSolid (state);
         attachedRope.SetActive(!state);
@@ -465,6 +708,44 @@ public class RopeManager : MonoBehaviourPun
     //Called from PlayerInput. PlayerInput sends the player's number so that we know who is pulling 
     public void InputFling(int playerNum)
     {
+        if (!isRopeCut)                     // if rope is cut, tug should not work
+        {
+            if (pullReady && (inAirFlings < maxAirFlings || nPlayersClamped > 0))
+            {
+                if (!PhotonNetwork.OfflineMode && TeamManager.Instance.IsTeamSharedOnline(TeamIndex))
+                {
+                    // do an RPC via server to avoid race conditions in case this team is shared online
+                    // note! because this message first goes to the server and then comes back to this client, there will be a noticable lag between input and actual fling, but only in high ping situations
+                    string sharedTeammateId = TeamManager.Instance.GetSharedTeammateClientID(TeamIndex);
+                    photonView.RPC(nameof(InputFlingLogic), RpcTarget.AllViaServer, playerNum, sharedTeammateId);
+                }
+                else
+                {
+                    // in offline or non-shared clients mode, just immediately fling to avoid any client -> server -> client latency lag between fling input and actual fling
+                    InputFlingLogic(playerNum, "", new PhotonMessageInfo(PhotonNetwork.LocalPlayer, 0, null));
+                }
+            }
+        }
+    }
+
+    [PunRPC]
+    private void InputFlingLogic(int playerNum, string sharedTeammateId, PhotonMessageInfo senderInfo)
+    {
+        if (!PhotonNetwork.OfflineMode && senderInfo.Sender != PhotonNetwork.LocalPlayer)
+        {
+            if (!string.IsNullOrEmpty(sharedTeammateId) && sharedTeammateId.Equals(PhotonNetwork.LocalPlayer.UserId))
+            {
+                if (inAirFlings < maxAirFlings)
+                {
+                    pullReady = false;
+                    pullTimer = pullTime;
+
+                    inAirFlings++;
+                }
+            }
+            return;
+        }
+
         if (!isRopeCut)                     // if rope is cut, tug should not work
         {
             if (pullReady && (inAirFlings < maxAirFlings || nPlayersClamped > 0))
@@ -492,33 +773,15 @@ public class RopeManager : MonoBehaviourPun
                 }*/
 
                 inAirFlings++;
+                AchievementsManager.Instance?.IncrementStat(StatType.NumFlings, 1);
 
                 PlayWhipSound();
                 if (!PhotonNetwork.OfflineMode)
                 {
-                    if (TeamManager.Instance.IsTeamSharedOnline(TeamIndex))
-                    {
-                        photonView.RPC("InputFlingRPC", partnerRB[partnerNum].GetComponent<PhotonView>().Owner);
-                    }
-
                     photonView.RPC("PlayWhipSound", RpcTarget.Others);
                 }
             }
         }
-    }
-
-    /// <summary>
-    /// To sync up InputFling variables that need to be synced up on a client sharing a team with this client
-    /// </summary>
-    [PunRPC]
-    private void InputFlingRPC()
-    {
-        // Debug.Log("Input fling sync");
-
-        pullReady = false;
-        pullTimer = pullTime;
-
-        inAirFlings++;
     }
 
     [PunRPC]
@@ -537,39 +800,27 @@ public class RopeManager : MonoBehaviourPun
 
     IEnumerator StrainFling (int flingerIndex, bool shouldCallFlingFunction)
     {
-        cameraShake.Shake(0.04f, 0.3f, 100);
-
         isStraining = true;
-        //strainParticles[partnerNum].SetActive(true);
-        StrainParticlesDisplayStatus(partnerNum, true);
-        if (!PhotonNetwork.OfflineMode)
-        {
-            photonView.RPC("StrainParticlesDisplayStatus", RpcTarget.Others, partnerNum, true);
-        }
 
-        // Start drag change
-        teamDragManager.SetAllPlayerDrag(teamDragManager.CharacterStrainDrag, teamDragManager.CharacterStrainAngularDrag);
-        teamDragManager.SetAllLinksDrag(teamDragManager.LinkStrainDrag);
+        if (PhotonNetwork.OfflineMode)
+            FlingStrainStart(partnerNum);
+        else
+            photonView.RPC("FlingStrainStart", RpcTarget.All, partnerNum);
+        
 
         anvilSavedDrag = anvil.drag;
         anvilSavedMass = anvil.mass;
         anvil.mass = anvilStrainMass;
         anvil.drag = anvilStrainDrag;
-        yield return new WaitForSeconds(0.3f);
 
-        //strainParticles[partnerNum].SetActive(false);
-        StrainParticlesDisplayStatus(partnerNum, false);
-        if (!PhotonNetwork.OfflineMode)
-        {
-            photonView.RPC("StrainParticlesDisplayStatus", RpcTarget.Others, partnerNum, false);
-        }
+        yield return new WaitForSeconds(0.4f);
+
         isStraining = false;
-        partnerModelHolders[partnerNum].localRotation = Quaternion.identity;
-        partnerModelHolders[partnerNum].localScale = Vector3.one;
-
-        // End drag change
-        teamDragManager.SetAllPlayerDrag(teamDragManager.CharacterDefaultDrag, teamDragManager.CharacterDefaultAngularDrag);
-        teamDragManager.SetAllLinksDrag(teamDragManager.LinkDefaultDrag);
+        
+        if (PhotonNetwork.OfflineMode)
+            FlingStrainEnd(partnerNum);
+        else
+            photonView.RPC("FlingStrainEnd", RpcTarget.All, partnerNum);
 
         anvil.mass = anvilSavedMass;
         anvil.drag = anvilSavedDrag;
@@ -578,6 +829,30 @@ public class RopeManager : MonoBehaviourPun
         {
             ForceFling();
         }
+    }
+
+    [PunRPC]
+    private void FlingStrainStart(int networkPartnerNum)
+    {
+        cameraShake.Shake(0.04f, 0.3f, 100);
+        //isStraining = true;
+        strainParticles[networkPartnerNum].SetActive(true);
+
+        teamDragManager.SetAllPlayerDrag(teamDragManager.CharacterStrainDrag, teamDragManager.CharacterStrainAngularDrag);
+        teamDragManager.SetAllLinksDrag(teamDragManager.LinkStrainDrag);
+    }
+
+    [PunRPC]
+    private void FlingStrainEnd(int networkPartnerNum)
+    {
+        //isStraining = false;
+        strainParticles[networkPartnerNum].SetActive(false);
+
+        teamDragManager.SetAllPlayerDrag(teamDragManager.CharacterDefaultDrag, teamDragManager.CharacterDefaultAngularDrag);
+        teamDragManager.SetAllLinksDrag(teamDragManager.LinkDefaultDrag);
+
+        partnerModelHolders[networkPartnerNum].localRotation = Quaternion.identity;
+        partnerModelHolders[networkPartnerNum].localScale = Vector3.one;
     }
 
     [PunRPC]
@@ -680,7 +955,8 @@ public class RopeManager : MonoBehaviourPun
             photonView.RPC("PlayFlingTrailRPC", RpcTarget.Others, 1 - partnerNum, forceMagnitude);
         }
 
-        ApplyTugArrow(flung.transform, dir, forceMagnitude);
+        //ApplyTugArrow(flung.transform, dir, forceMagnitude);
+
         FlingPlayerRB(1 - partnerNum, forceToBeApplied);
 
         /*if (PhotonNetwork.OfflineMode || flung.GetComponent<PhotonView>().IsMine) {
@@ -754,6 +1030,10 @@ public class RopeManager : MonoBehaviourPun
     /// <param name="forceZ">z component of force to be applied</param>
     [PunRPC]
     private void FlingPlayerRBRPC(int flungIndex, float forceX, float forceY, float forceZ) {
+
+        teamDragManager.SetAllPlayerDrag(teamDragManager.CharacterDefaultDrag, teamDragManager.CharacterDefaultAngularDrag);
+        teamDragManager.SetAllLinksDrag(teamDragManager.LinkDefaultDrag);
+
         Rigidbody flung = partnerRB[flungIndex];
         Vector3 thisForceToBeApplied = new Vector3(forceX, forceY, forceZ);
         flung.AddForce(thisForceToBeApplied, ForceMode.Acceleration);
@@ -837,7 +1117,7 @@ public class RopeManager : MonoBehaviourPun
         tugArrow.SetActive(false);
     }
 
-    public void ChangeRopeCutStatus(bool cut)
+    public void ChangeRopeCutStatus(bool cut, bool playAudioVisualFeedback = true)
     {
         int mid = links.Length / 2;
         isRopeCut = cut;
@@ -849,11 +1129,14 @@ public class RopeManager : MonoBehaviourPun
             springRope.SetActive(false);
             cutRope.SetActive(true);
 
-            cutParticles.gameObject.transform.position = tempBody.position;
-            cutParticles.Emit(200);
-            RuntimeManager.AttachInstanceToGameObject(cutSound, midConnectedBody.transform, midConnectedBody);
-            //cutSound.set3DAttributes(RuntimeUtils.To3DAttributes(midConnectedBody.transform));
-            cutSound.start();
+            if (playAudioVisualFeedback)
+            {
+                cutParticles.gameObject.transform.position = tempBody.position;
+                cutParticles.Emit(200);
+                RuntimeManager.AttachInstanceToGameObject(cutSound, midConnectedBody.transform, midConnectedBody);
+                //cutSound.set3DAttributes(RuntimeUtils.To3DAttributes(midConnectedBody.transform));
+                cutSound.start();
+            }
 
             linkRBs[linkRBs.Length / 2].AddForce(Vector3.up * 30f, ForceMode.Impulse);
             linkRBs[(linkRBs.Length / 2)-1].AddForce(Vector3.up * 30f, ForceMode.Impulse);
@@ -863,7 +1146,7 @@ public class RopeManager : MonoBehaviourPun
             midLink.connectedBody = midConnectedBody;
             cutRope.SetActive(false);
 
-            if (isRopeSolid)
+            if (IsRopeSolid)
             {
                 springRope.SetActive(true);
             }
@@ -872,16 +1155,51 @@ public class RopeManager : MonoBehaviourPun
                 attachedRope.SetActive(true);
             }
         }
+
+        xrayRope.SetRopeCutStatus(isRopeCut);
     }
+
+    public void DisableAndHideRope()
+    {
+        attachedRope.SetActive(false);
+        springRope.SetActive(false);
+        cutRope.SetActive(false);
+
+        //links[0].GetComponent<ConfigurableJoint>().connectedBody = null;
+
+        //for (int i = 0; i < links.Length; i++)
+        //{
+        //    links[i].gameObject.SetActive(false);
+        //}
+
+        //ropeFlashLine.gameObject.SetActive(false);
+        //isRopeEnabled = false;
+    }
+
+    public void EnableAndShowRope()
+    {
+        attachedRope.SetActive(true);
+        springRope.SetActive(false);
+        cutRope.SetActive(false);
+
+        //for (int i = 0; i < links.Length; i++)
+        //{
+        //    links[i].gameObject.SetActive(true);
+        //}
+
+        ////links[0].GetComponent<ConfigurableJoint>().connectedBody = partnerRB[0];
+        //ropeFlashLine.gameObject.SetActive(true);
+        //isRopeEnabled = true;
+    }
+
     private void ShouldRopeFlashCheck()
     {
-        if (!IsRopeCut && averageLinkDistance > 0.75f && (pullReady || isStraining) && !isRopeSolid) //should flash
+        if (hasInitialized && !IsRopeCut && averageLinkDistance > 0.75f && (pullReady || isStraining) && !IsRopeSolid) //should flash
         {
             if (!ropeIsFlashing)
             {
                 ropeFlashLine.ToggleFlash(true);
                 ropeIsFlashing = true;
-                
             }
         }
         //else if (IsRopeCut)
@@ -906,11 +1224,14 @@ public class RopeManager : MonoBehaviourPun
             trigger.OnTrigger -= () => inAirFlings = 0;
         }
 
-        for (int i = 0; i < 2; i++)
+        if (partnerPMs != null)
         {
-            partnerPMs[i].OnGrounded -= () => inAirFlings = 0;
-            partnerPMs[i].OnPlayerClamp -= (t, p, c) => { nPlayersClamped++; };
-            partnerPMs[i].OnPlayerUnclamp -= (t, p) => { inAirFlings = 0; nPlayersClamped--; };
+            for (int i = 0; i < 2; i++)
+            {
+                partnerPMs[i].OnGrounded -= () => inAirFlings = 0;
+                partnerPMs[i].OnPlayerClamp -= (t, p, c) => { nPlayersClamped++; };
+                partnerPMs[i].OnPlayerUnclamp -= (t, p) => { inAirFlings = 0; nPlayersClamped--; };
+            }
         }
     }
 
@@ -927,4 +1248,22 @@ public class RopeManager : MonoBehaviourPun
             link.angularVelocity = Vector3.zero;
         }
     }
+
+    public void SetRespawning(bool respawning)
+    {
+        isRespawningDontSmooth = respawning;
+    }
+
+    public void SetWeightType (GameObject weight, float mass, float linkMass, float strainForce)
+    {
+        anvil = weight.GetComponent<Rigidbody>();
+
+        anvil.mass = mass;
+
+        SetLinkMasses(linkMass);
+
+        anvilStrainForce = strainForce;
+    }
+
 }
+

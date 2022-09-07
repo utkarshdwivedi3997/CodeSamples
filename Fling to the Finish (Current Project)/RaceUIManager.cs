@@ -1,11 +1,15 @@
-﻿using System.Collections;
-using System.Collections.Generic;
-using UnityEngine;
-using UnityEngine.UI;
-using Fling.GameModes;
-using TMPro;
+﻿using Fling.GameModes;
 using Fling.Saves;
-using UnityEngine.EventSystems;
+using System.Collections;
+using System.Collections.Generic;
+using TMPro;
+using UnityEngine;
+using UnityEngine.Serialization;
+using UnityEngine.UI;
+using Fling.Localization;
+using FMODUnity;
+using ControllerLayout = Menus.ControllerLayout;
+using Menus;
 
 public class RaceUIManager : MonoBehaviour
 {
@@ -23,35 +27,32 @@ public class RaceUIManager : MonoBehaviour
         [Header("Single Line Description")]
 
         [SerializeField]
-        private GameObject singleLineGroup;
-        public GameObject SingleLineGroup { get { return singleLineGroup; } }
+        private LocalizedText singleModeNameText;
+        public LocalizedText SingleModeNameText { get { return singleModeNameText; } }
 
         [SerializeField]
-        private TextMeshProUGUI singleModeNameText;
-        public TextMeshProUGUI SingleModeNameText { get { return singleModeNameText; } }
+        private LocalizedText singleModeDescriptionText;
+        public LocalizedText SingleModeDescriptionText { get { return singleModeDescriptionText; } }
 
         [SerializeField]
-        private TextMeshProUGUI singleModeDescriptionText;
-        public TextMeshProUGUI SingleModeDescriptionText { get { return singleModeDescriptionText; } }
-
-
-        [Header("Double Line Description")]
+        private TextMeshProUGUI bestTimeText;
+        public TextMeshProUGUI BestTimeText { get { return bestTimeText; } }
 
         [SerializeField]
-        private GameObject doubleLineGroup;
-        public GameObject DoubleLineGroup { get { return doubleLineGroup; } }
+        private Image[] imagesToChangeColor;
+        public Image[] ImagesToChangeColor { get { return imagesToChangeColor; }}
 
         [SerializeField]
-        private TextMeshProUGUI doubleModeNameText;
-        public TextMeshProUGUI DoubleModeNameText { get { return doubleModeNameText; } }
+        private Image[] duckCollected;
+        public Image[] DuckCollected { get { return duckCollected; } }
 
         [SerializeField]
-        private TextMeshProUGUI doubleModeDescriptionTextOne;
-        public TextMeshProUGUI DoubleModeDescriptionTextOne { get { return doubleModeDescriptionTextOne; } }
+        private GameObject bestTimeParent;
+        public GameObject BestTimeParent { get { return bestTimeParent; } }
 
         [SerializeField]
-        private TextMeshProUGUI doubleModeDescriptionTextTwo;
-        public TextMeshProUGUI DoubleModeDescriptionTextTwo { get { return doubleModeDescriptionTextTwo; } }
+        private GameObject duckParent;
+        public GameObject DuckParent { get { return duckParent; } }
     }
     [SerializeField]
     private PreRace preRace;
@@ -83,15 +84,29 @@ public class RaceUIManager : MonoBehaviour
 
         [Header("Race Timer")]
         [SerializeField]
-        private GameObject timerPanel;
-        public GameObject TimerPanel { get { return timerPanel; } }
-        public Animator TimerAnimator { get; private set; }
+        private Animator masterTimerAnimator;
+        public Animator MasterTimerAnimator { get { return masterTimerAnimator; } }
 
         [SerializeField]
-        private TextMeshProUGUI timerText;
-        public TextMeshProUGUI TimerText { get { return timerText; } }
+        private GameObject timerPanel;
+        public GameObject TimerPanel { get { return timerPanel; } }
+        [SerializeField] private GameObject timerPanelWithGoals;
+        public GameObject TimerPanelWithGoals { get { return timerPanelWithGoals; } }
 
-        [Header ("During Race Rank Placements")]
+        [SerializeField] private TextMeshProUGUI timerText;
+        [SerializeField] private TextMeshProUGUI timerTextForGoalsTimer;
+        public TextMeshProUGUI TimerText { get; private set; }
+
+        [SerializeField] private TextMeshProUGUI timeGoalText;
+        public TextMeshProUGUI TimeGoalText { get { return timeGoalText; } }
+
+        [SerializeField] private Animator[] timerGoalAnimators;
+        public Animator[] TimerGoalAnimators { get { return timerGoalAnimators; } }
+
+        [SerializeField] [EventRef] private string timeObjectiveFailedSFX;
+        public string TimeObjectiveFailedSFX { get { return timeObjectiveFailedSFX; } }
+
+        [Header("During Race Rank Placements")]
         [SerializeField]
         private Image rankPlacementBoxLeft;
         [SerializeField]
@@ -100,7 +115,7 @@ public class RaceUIManager : MonoBehaviour
         /// Array of [rankPlacementBoxLeft, rankPlacementBoxRight]
         /// </summary>
         public Image[] RankPlacementBoxes { get; private set; }
-        
+
         [SerializeField]
         private TextMeshProUGUI rankTextLeft;
         [SerializeField]
@@ -109,6 +124,22 @@ public class RaceUIManager : MonoBehaviour
         /// Array of [rankTextLeft, rankTextRight]
         /// </summary>
         public TextMeshProUGUI[] RankTexts { get; private set; }
+
+        [Space]
+        [Header("GameMode HUD")]
+        [SerializeField, FormerlySerializedAs("counterCanvasGroup")] private CanvasGroup textCounterCanvasGroup;
+        public CanvasGroup TextCounterCanvasGroup => textCounterCanvasGroup;
+        [SerializeField, FormerlySerializedAs("counterImage")] private Image textCounterImage;
+        public Image TextCounterImage => textCounterImage;
+        [SerializeField] private TextMeshProUGUI counterText;
+        public TextMeshProUGUI CounterText => counterText;
+
+        [SerializeField] private CanvasGroup imageCounterCanvasGroup;
+        public CanvasGroup ImageCounterCanvasGroup => imageCounterCanvasGroup;
+        [SerializeField] private Image[] counterImageBGs;
+        public Image[] CounterImageBGs => counterImageBGs;
+        [SerializeField] private Image[] counterImageFills;
+        public Image[] CounterImageFills => counterImageFills;
 
         [Header("On Team Finish Race Variables")]
         [SerializeField]
@@ -122,14 +153,14 @@ public class RaceUIManager : MonoBehaviour
         private MouseJoystickVisualizer mouseJoystickSimulationVisualizer;
         public MouseJoystickVisualizer MouseJoystickSimulationVisualizer { get { return mouseJoystickSimulationVisualizer; } }
 
-        public void Init()
+        public void Init(GameModeScriptableObject currentGamemodeObject)
         {
             RankPlacementBoxes = new Image[] { rankPlacementBoxLeft, rankPlacementBoxRight };
             RankTexts = new TextMeshProUGUI[] { rankTextLeft, rankTextRight };
 
             RaceWinPanels = new RaceWinTeamPanel[] { raceWinPanelLeft, raceWinPanelRight };
 
-            TimerAnimator = timerPanel.GetComponent<Animator>();
+            TimerText = currentGamemodeObject.ShowTimeGoals ? timerTextForGoalsTimer : timerText;
         }
     }
     [SerializeField]
@@ -146,56 +177,33 @@ public class RaceUIManager : MonoBehaviour
     public struct EndOfRace
     {
         [SerializeField]
-        private CanvasGroup canvasGroup;
-        public CanvasGroup CanvasGroup { get { return canvasGroup; } }
+        private EndOfLevelScreen[] endOfLevelScreens;
+        public Dictionary<EndOfLevelScreenType, EndOfLevelScreen> EndOfLevelScreens { get; private set; }
 
-        [SerializeField]
-        private Transform placementsParent;
-        public Transform PlacementsParent { get { return placementsParent; } }
+        [SerializeField] private EndOfLevelScreenType[] endOfLevelScreenOrder;
+        public EndOfLevelScreenType[] EndOfLevelScreenOrder { get { return endOfLevelScreenOrder; } }
 
-        [SerializeField] private TextMeshProUGUI winTimerText;
-        /// <summary>
-        /// Text field to show the time taken by the first place team in THIS race
-        /// </summary>
-        public TextMeshProUGUI WinTimerText { get { return winTimerText; } }
+        [SerializeField] private EndOfLevelScreenType[] endOfLevelScreenOrderForFail;
+        public EndOfLevelScreenType[] FailLevelEndScreenOrder { get { return endOfLevelScreenOrderForFail; } }
 
-        [SerializeField] private TextMeshProUGUI bestTimerText;
-        public TextMeshProUGUI BestTimerText { get { return bestTimerText; } }
+        public void Init()
+        {
+            EndOfLevelScreens = new Dictionary<EndOfLevelScreenType, EndOfLevelScreen>();
 
-        [SerializeField] private GameObject newRecordObject;
-        public GameObject NewRecordObject { get { return newRecordObject; } }
+            foreach (EndOfLevelScreen screen in endOfLevelScreens)
+            {
+                EndOfLevelScreens[screen.ScreenType] = screen;
+                screen.InitializeScreen();
+            }
+        }
 
-        [SerializeField] private GameObject bestTimerRow;
-        /// <summary>
-        /// 
-        /// </summary>
-        public GameObject BestTimerRow { get { return bestTimerRow; } }
-
-        [SerializeField]
-        private GameObject[] teamRows;
-        /// <summary>
-        /// Utkarsh, I don't really understand why I'm doing this but I'm falling your good example
-        /// </summary>
-        public GameObject[] TeamRows { get { return teamRows; } }
-
-        [SerializeField]
-        private TextMeshProUGUI[] teamFinishTexts;
-        public TextMeshProUGUI[] TeamFinishTexts { get { return teamFinishTexts; } }
-
-        [SerializeField]
-        private GameObject[] endButtons;
-        public GameObject[] EndButtons { get { return endButtons; } }
-
-        [Header("Trophies")]
-        [SerializeField]
-        private Animator levelBeatenAnimator;
-        public Animator LevelBeatenAnimator { get { return levelBeatenAnimator; } }
-        [SerializeField]
-        private Animator silverUnlockedAnimator;
-        public Animator SilverUnlockedAnimator { get { return silverUnlockedAnimator; } }
-        [SerializeField]
-        private Animator goldUnlockedAnimator;
-        public Animator GoldUnlockedAnimator { get { return goldUnlockedAnimator; } }
+        public void InitializeAfterSaveLoad()
+        {
+            foreach (EndOfLevelScreen screen in endOfLevelScreens)
+            {
+                screen.InitializeScreenAfterSaveLoad();
+            }
+        }
     }
     [SerializeField]
     private EndOfRace endOfRace;
@@ -208,11 +216,12 @@ public class RaceUIManager : MonoBehaviour
 
     public static string[] RacePlacementStringVals = new string[] { "1<sup>st</sup>", "2<sup>nd</sup>", "3<sup>rd</sup>", "4<sup>th</sup>", "5<sup>th<sup>", "6<sup>th<sup>", "7<sup>th<sup>", "8<sup>th<sup>" };     // 1st, 2nd, 3th,... , 8th with proper superscripts
 
-    private float previousBestTime;
-
     private int winPanelsActive = 0;
-
-    private bool wasLevelBeatenBefore = false, wasSilverUnlockedBefore = false, wasGoldUnlockedBefore = false;
+    private GameModeBase currentGameModeScript;
+    private GamemodeHUDCounter currentHUDCounter;
+    private int currentTimeObjectiveIndex = 0;
+    private bool isShowingTimeGoals;
+    [SerializeField] private bool areYouAGamer = false;
     #endregion
 
     #endregion
@@ -227,6 +236,8 @@ public class RaceUIManager : MonoBehaviour
         camRects = new Rect[] { new Rect(0, 0, 1f, 1f), new Rect(0.5f, 0, 0.0f, 0.0f) };
 
         RaceManager.Instance.OnGamePaused += OnPaused;
+        PopUpNotification.OnPopUpShown += ShowCursor;
+        PopUpNotification.OnPopUpDismissed += HideCursor;
 
         // =================== PRE RACE =================== //
 
@@ -237,7 +248,7 @@ public class RaceUIManager : MonoBehaviour
 
         // =================== DURING RACE =================== //
 
-        duringRace.Init();
+        duringRace.Init(currentGameModeObject);
 
         RaceManager.Instance.OnRaceCountdownStarted += OnRaceCountdownStarted;
         RaceManager.Instance.OnRaceBegin += OnRaceBegin;
@@ -252,8 +263,7 @@ public class RaceUIManager : MonoBehaviour
 
         // =================== END OF RACE =================== //
 
-        RaceManager.Instance.OnRaceFinish += OnRaceFinish;
-        endOfRace.CanvasGroup.gameObject.SetActive(false);
+        endOfRace.Init();
 
         #endregion
 
@@ -271,10 +281,11 @@ public class RaceUIManager : MonoBehaviour
 
         #region Init after team initalization
         // Lock cursor!
-        Cursor.lockState = CursorLockMode.Locked;
-        Cursor.visible = false;
+        HideCursor();
 
         // =================== GENERAL =================== //
+
+        currentGameModeScript = RaceReferences.Instance.GameModes.CurrentGameModeScript;
 
         // End of race UI scaling
         camRects = TeamManager.Instance.TeamsOnThisClient == 1 ? camRects : new Rect[] { new Rect(0, 0, 0.5f, 1f), new Rect(0.5f, 0, 0.5f, 1f) };
@@ -289,17 +300,7 @@ public class RaceUIManager : MonoBehaviour
         // =================== END OF RACE =================== //
 
         Fling.Levels.LevelScriptableObject currentLevel = MetaManager.Instance.CurrentLevel;
-        wasLevelBeatenBefore = SaveManager.Instance.IsLevelBeaten(currentLevel);
-        wasSilverUnlockedBefore = SaveManager.Instance.IsLevelSilverTrophyUnlocked(currentLevel);
-        wasGoldUnlockedBefore = SaveManager.Instance.IsLevelGoldTrophyUnlocked(currentLevel);
-
-        //endOfRace.SilverUnlockedAnimator.enabled = false;
-        //endOfRace.GoldUnlockedAnimator.enabled = false;
-
-        //endOfRace.LevelBeatenAnimator.gameObject.SetActive(wasLevelBeatenBefore);
-        //endOfRace.SilverUnlockedAnimator.gameObject.SetActive(wasSilverUnlockedBefore);
-        //endOfRace.GoldUnlockedAnimator.gameObject.SetActive(wasGoldUnlockedBefore);
-
+        endOfRace.InitializeAfterSaveLoad();
         #endregion
     }
 
@@ -309,26 +310,58 @@ public class RaceUIManager : MonoBehaviour
         RaceManager.Instance.OnPreRaceSetupStarted -= OnPreRaceSetupStarted;
         RaceManager.Instance.OnPreRaceSetupOver += OnPreRaceSetupOver;
 
-        previousBestTime = SaveManager.Instance.GetBestTime(MetaManager.Instance.CurrentLevel);
+        LevelData levelData = SaveManager.Instance.GetSavedDataForLevel(MetaManager.Instance.CurrentLevel);
 
         preRace.CanvasGroup.gameObject.SetActive(true);
         preRace.CanvasGroup.alpha = 1f;
 
         if (currentGameModeObject != null)
         {
-            if (currentGameModeObject.TwoLineDescription)
+            
+
+            foreach(Image image in preRace.ImagesToChangeColor)
             {
-                preRace.DoubleLineGroup.SetActive(true);
-                preRace.DoubleModeNameText.text = currentGameModeObject.ModeName;
-                preRace.DoubleModeDescriptionTextOne.text = currentGameModeObject.Description;
-                preRace.DoubleModeDescriptionTextTwo.text = currentGameModeObject.DescriptionTwo;
-                
+                image.color = currentGameModeObject.ModeUIColor;
             }
-            else
+
+            if (levelData != null)
             {
-                preRace.SingleLineGroup.SetActive(true);
-                preRace.SingleModeNameText.text = currentGameModeObject.ModeName;
-                preRace.SingleModeDescriptionText.text = currentGameModeObject.Description;
+                float bestTime = -1f;
+                //preRace.BestTimeText.GetComponent<LocalizedText>().UpdateWithoutKey();
+
+                bool trophy1Unlocked = false, trophy2Unlocked = false, trophy3Unlocked = false;
+                if (levelData.ModeSaveData.ContainsKey(currentGameModeObject.Mode))
+                {
+                    ModeSaveData mData = levelData.ModeSaveData[currentGameModeObject.Mode];
+                    trophy1Unlocked = mData.Trophy1Unlocked;
+                    trophy2Unlocked = mData.Trophy2Unlocked;
+                    trophy3Unlocked = mData.Trophy3Unlocked;
+
+                    bestTime = mData.BestTime;
+                }
+                preRace.DuckCollected[0].enabled = trophy1Unlocked;
+                preRace.DuckCollected[1].enabled = trophy2Unlocked;
+                preRace.DuckCollected[2].enabled = trophy3Unlocked;
+
+                preRace.BestTimeText.text = LocalizationManager.Instance.GetLocalizedValue("best time") + " " + Utilities.GetTimeFormatted(bestTime);
+            }
+
+            if (!MetaManager.Instance.isInTutorialLevel )
+            {
+                preRace.SingleModeDescriptionText.OverrideKeyAndUpdate(currentGameModeObject.Description);
+                preRace.SingleModeNameText.OverrideKeyAndUpdate(currentGameModeObject.ModeName);
+
+                if (currentGameModeObject.Mode == GameMode.Race)
+                {
+                    preRace.DuckParent.SetActive(false);
+                }
+            }
+            else //is in Tutorial
+            {
+                preRace.SingleModeDescriptionText.OverrideKeyAndUpdate(currentGameModeObject.DescriptionTwo);
+                preRace.SingleModeNameText.OverrideKeyAndUpdate("DesertTutorial");
+                preRace.DuckParent.SetActive(false);
+                preRace.BestTimeParent.SetActive(false);
             }
         }
     }
@@ -347,9 +380,12 @@ public class RaceUIManager : MonoBehaviour
     /// Updates the race timer text with formatted time
     /// </summary>
     /// <param name="time"></param>
-    public void UpdateTimerText(float time)
+    public void UpdateTimer(RaceTimer timer)
     {
-        duringRace.TimerText.text = Utilities.GetTimeFormatted(time);
+        if (timer.TimerType != RaceTimerType.None)
+        {
+            duringRace.TimerText.text = Utilities.GetTimeFormatted(timer.CurrentTime);
+        }
     }
     #endregion
 
@@ -360,8 +396,49 @@ public class RaceUIManager : MonoBehaviour
         RaceManager.Instance.OnRaceCountdownStarted -= OnRaceCountdownStarted;
         RaceManager.Instance.OnRaceCountdownFinished += OnRaceCountdownFinished;
 
+        switch (MetaManager.Instance.CurrentGameModeObject.GameModeHUDCounterType)
+        {
+            case GameModeHUDCounterType.NumericText:
+                currentHUDCounter = gameObject.AddComponent<GamemodeHUDNumericCounter>();
+                break;
+            case GameModeHUDCounterType.SameImageForEachCounter:
+                currentHUDCounter = gameObject.AddComponent<GameModeHUDSingleImageCounter>();
+                break;
+            case GameModeHUDCounterType.DifferentImageForEachCounter:
+                currentHUDCounter = gameObject.AddComponent<GameModeHUDDifferentImageCounter>();
+                break;
+            case GameModeHUDCounterType.None:
+                currentHUDCounter = gameObject.AddComponent<GameModeHUDNoCounter>();
+                break;
+        }
+
+        isShowingTimeGoals = false;
+        if (!MetaManager.Instance.isInTutorialLevel)
+        {
+            currentHUDCounter.Setup(duringRace, currentGameModeScript);
+            currentHUDCounter.UpdateCounter();
+            currentGameModeScript.OnCollectableCountUpdated += currentHUDCounter.UpdateCounter;
+
+            isShowingTimeGoals = currentGameModeObject.ShowTimeGoals;
+        }
+
+        duringRace.TimerPanelWithGoals.SetActive(isShowingTimeGoals);
+        duringRace.TimerPanel.SetActive(!isShowingTimeGoals);
+        if (isShowingTimeGoals)
+        {
+            
+            float firstTimeToBeat = RaceManager.Instance.RaceTimer.GetCurrentTimeObjective();
+            RaceManager.Instance.RaceTimer.OnTimeObjectiveFailed += OnTimeObjectiveFailed;
+            RaceManager.Instance.RaceTimer.OnAllTimeObjectivesFailed += OnAllTimeObjectivesFailed;
+            currentTimeObjectiveIndex = 0;
+            duringRace.TimeGoalText.text = Utilities.GetTimeFormatted(firstTimeToBeat);
+        }
+
         duringRace.CanvasGroup.gameObject.SetActive(true);
         duringRace.CountdownPanel.SetActive(true);
+
+        DisplayMouseUIIfNeeded();
+        SaveManager.Instance.OnMouseAndKeyboardButtonsChanged += DisplayMouseUIIfNeeded;
     }
 
     private void OnRaceCountdownFinished()
@@ -383,8 +460,8 @@ public class RaceUIManager : MonoBehaviour
         RaceManager.Instance.OnRaceBegin -= OnRaceBegin;
         RaceManager.Instance.OnRaceFinish += OnRaceFinish;
 
-        RaceManager.Instance.OnTeamWin += OnTeamFinishedRace;
-        
+        RaceManager.Instance.OnTeamFinishedLevel += OnTeamFinishedRace;
+
         if (!duringRace.CanvasGroup.gameObject.activeSelf)
         {
             duringRace.CanvasGroup.gameObject.SetActive(true);
@@ -430,8 +507,58 @@ public class RaceUIManager : MonoBehaviour
         txtToChng.text = RacePlacementStringVals[rank];
     }
 
+    private void OnTimeObjectiveFailed(float failedTimeObjective, float nextTimeObjective)
+    {
+        if (currentTimeObjectiveIndex < 3)
+        {
+            currentTimeObjectiveIndex++;
+            duringRace.TimeGoalText.text = Utilities.GetTimeFormatted(nextTimeObjective);
+            int failedObjectiveIndex = 3 - currentTimeObjectiveIndex;
+            if (duringRace.TimerGoalAnimators.Length > failedObjectiveIndex)
+            {
+                duringRace.TimerGoalAnimators[failedObjectiveIndex].SetTrigger("DuckLoss");
+            }
+            RuntimeManager.PlayOneShot(duringRace.TimeObjectiveFailedSFX);
+        }
+    }
+
+    private void OnAllTimeObjectivesFailed()
+    {
+        duringRace.TimeGoalText.text = "-- : -- : --";
+    }
+
     private void OnTeamFinishedRace(int teamIndex)
     {
+        /*if (winningTeam < 0)
+        {
+            winningTeam = teamIndex;
+            //losingTeamOnClient = winningTeam == 1 ? 2 : 1;
+
+            // Only do the camera resize stuff if winner's camera is owned by this team
+            if (TeamManager.Instance.IndicesOfTeamsOnThisClient.Contains(winningTeam))
+            {
+                int idxOfWinner = TeamManager.Instance.IndicesOfTeamsOnThisClient.IndexOf(winningTeam);
+                winningTeamSide = TeamManager.Instance.SpawnSideOfTeamsOnThisClient[idxOfWinner];
+
+                if (TeamManager.Instance.TeamsOnThisClient == 2)
+                {
+                    losingTeamOnClient = TeamManager.Instance.IndicesOfTeamsOnThisClient[1 - idxOfWinner];
+                    losingTeamOnThisClientSide = TeamManager.Instance.SpawnSideOfTeamsOnThisClient[1 - idxOfWinner];
+                }
+
+                winningTeamCamera = TeamManager.Instance.GetTeamCamera(winningTeam);
+                losingTeamCamera = TeamManager.Instance.GetTeamCamera(losingTeamOnClient);
+
+                startCameraResize = true;
+            }
+        }*/
+
+        if (RaceManager.Instance.IsRaceOver)
+        {
+            RaceManager.Instance.OnTeamFinishedLevel -= OnTeamFinishedRace;
+            return;
+        }
+
         if (TeamManager.Instance.IndicesOfTeamsOnThisClient.Contains(teamIndex))
         {
             int localTeamIdx = TeamManager.Instance.IndicesOfTeamsOnThisClient.IndexOf(teamIndex);
@@ -448,29 +575,22 @@ public class RaceUIManager : MonoBehaviour
             if (winPanelsActive >= TeamManager.Instance.TeamsOnThisClient)
             {
                 // Unsubscribe from RaceManager's win event
-                RaceManager.Instance.OnTeamWin -= OnTeamFinishedRace;
+                RaceManager.Instance.OnTeamFinishedLevel -= OnTeamFinishedRace;
             }
         }
     }
     #endregion
 
     #region RaceOver
-    private void OnRaceFinish()
+    private void OnRaceFinish(bool beaten)
     {
         RaceManager.Instance.OnRaceFinish -= OnRaceFinish;
-        RaceManager.Instance.OnTeamWin -= OnTeamFinishedRace;
+        RaceManager.Instance.OnTeamFinishedLevel -= OnTeamFinishedRace;
         RaceManager.Instance.OnGamePaused -= OnPaused;
+        currentGameModeScript.OnCollectableCountUpdated += currentHUDCounter.UpdateCounter;
 
         // End of race, unlock cursor
-        Cursor.lockState = CursorLockMode.None;
-        Cursor.visible = true;
-
-        // Deactivate extra UI
-        for (int i = 0; i < duringRace.RaceWinPanels.Length; i++)
-        {
-            duringRace.RaceWinPanels[i].gameObject.SetActive(false);
-        }
-        winPanelsActive = 0;
+        MetaManager.Instance.CursorHandler.SetToShowCursorWhenPossible();
 
         // Make all spectating teams see themselves
         for (int i = 0; i < TeamManager.Instance.TeamsOnThisClient; i++)
@@ -480,88 +600,83 @@ public class RaceUIManager : MonoBehaviour
             UpdateSpectate(idx, idx);
         }
 
-        duringRace.TimerAnimator.SetTrigger("Deactivate");
+        // Deactivate extra UI
+        for (int i = 0; i < duringRace.RaceWinPanels.Length; i++)
+        {
+            duringRace.RaceWinPanels[i].Deactivate();
+            duringRace.RaceWinPanels[i].gameObject.SetActive(false);
+        }
+        winPanelsActive = 0;
 
+        duringRace.MasterTimerAnimator.SetTrigger("Deactivate");
+
+        // show the fail UI if level was not beaten and this is a campaign type gamemode
+        isShowingFailUI = !beaten && MenuData.MainMenuData.PlayType == MenuData.PlayType.Campaign;
         ShowEndOfRaceUI();
     }
+
+    private int currEndScreenIdx;
+    private bool isShowingFailUI = false;
 
     /// <summary>
     /// UI to show at the end of the race
     /// </summary>
     private void ShowEndOfRaceUI()
     {
-        endOfRace.CanvasGroup.gameObject.SetActive(true);
-        float finishTime = RaceManager.Instance.RaceFinishTime;
-        string formattedTime = Utilities.GetTimeFormatted(finishTime);
-        endOfRace.WinTimerText.text = formattedTime;
-
-        if (previousBestTime < 0) //No previous best time recorded
+        EndOfLevelScreenType[] screenOrder = endOfRace.EndOfLevelScreenOrder;
+        if (isShowingFailUI)
         {
-            endOfRace.NewRecordObject.SetActive(true); //NEW RECORD!
-        }
-        else //There is a real previous best time
-        {
-            string formattedBestTime = Utilities.GetTimeFormatted(previousBestTime);
-            endOfRace.BestTimerText.text = formattedBestTime;
-
-            if (finishTime < previousBestTime) 
-            {
-                endOfRace.BestTimerRow.transform.SetSiblingIndex(1); //a hard value of 1 may only be correct in local play
-                endOfRace.NewRecordObject.SetActive(true); //NEW RECORD!
-            }
-            else //No one got a better time. BOOO-WHOOO
-            {
-                endOfRace.WinTimerText.color = Color.white;
-                endOfRace.BestTimerRow.transform.SetSiblingIndex(0);
-                endOfRace.NewRecordObject.SetActive(false);
-            }
+            screenOrder = endOfRace.FailLevelEndScreenOrder;
         }
 
-        StartCoroutine(ShowPlacements());
+        // Main UI for winning
+        currEndScreenIdx = 0;
 
-        StartCoroutine(ShowTrophies());
+        if (screenOrder != null
+            && screenOrder != null
+            && screenOrder.Length > currEndScreenIdx
+            && endOfRace.EndOfLevelScreens.ContainsKey(screenOrder[currEndScreenIdx]))
+        {
+            EndOfLevelScreen screen = endOfRace.EndOfLevelScreens[screenOrder[currEndScreenIdx]];
+            screen.OnScreenFinished += OnCurrentEndScreenFinished;
+            screen.StartScreen(isShowingFailUI);
+        }
+        else
+        {
+            Debug.LogError("Error in RaceUIManager: Current screen index has passed the number of available screens!");
+        }
     }
 
-    IEnumerator ShowPlacements()
+    private void OnCurrentEndScreenFinished(EndOfLevelScreen prevScreen)
     {
-        yield return new WaitForSeconds(2f);
-
-        List<int> teamRanks = RaceManager.Instance.FinalTeamIndicesOrderedByRank;
-
-        int i = 0;
-        for (i = 0; i < TeamManager.Instance.TotalNumberOfTeams; i++)
+        EndOfLevelScreenType[] screenOrder = endOfRace.EndOfLevelScreenOrder;
+        if (isShowingFailUI)
         {
-            CharacterContent cc = TeamManager.Instance.TeamInstance[teamRanks[i]].GetComponent<CharacterContent>();
-            endOfRace.TeamFinishTexts[i].text = cc.teamName;
-
-            //Set placements active in order of children (since the previous best can be anywhere and we don't want the vertical layout group to snap)
-            endOfRace.PlacementsParent.GetChild(i).gameObject.SetActive(true);
-            yield return new WaitForSeconds(1.5f);
+            screenOrder = endOfRace.FailLevelEndScreenOrder;
         }
 
-        if (previousBestTime > 0) //There is a real recorded previous best, so make sure we turn on 1 additional row
+        prevScreen.OnScreenFinished -= OnCurrentEndScreenFinished;
+
+        currEndScreenIdx++;
+
+        if (currEndScreenIdx < screenOrder.Length)
         {
-            endOfRace.PlacementsParent.GetChild(i).gameObject.SetActive(true);
-        }
+            EndOfLevelScreenType nextTypeToShow = screenOrder[currEndScreenIdx];
 
-        StartCoroutine(ShowButtons());
-    }
-
-    IEnumerator ShowButtons()
-    {
-        yield return new WaitForSeconds(1.5f);
-        
-
-        for (int i = 0; i < endOfRace.EndButtons.Length; i++)
-        {
-            endOfRace.EndButtons[i].SetActive(true);
-
-            if (i == 0)
+            if (endOfRace.EndOfLevelScreens.ContainsKey(nextTypeToShow))
             {
-                EventSystem.current.SetSelectedGameObject(endOfRace.EndButtons[0]);
-                RaceManager.Instance.EndOfRaceUIAnimationFinished();
+                EndOfLevelScreen screen = endOfRace.EndOfLevelScreens[nextTypeToShow];
+                screen.OnScreenFinished += OnCurrentEndScreenFinished;
+                screen.StartScreen(isShowingFailUI);
             }
-            yield return new WaitForSeconds(0.5f);
+            else
+            {
+                Debug.LogError("Error in RaceUIManager: End of level screens list does not contain current screen to show!");
+            }
+        }
+        else
+        {
+            Debug.LogError("Error in RaceUIManager: Current screen index has passed the number of available screens!");
         }
     }
 
@@ -572,6 +687,11 @@ public class RaceUIManager : MonoBehaviour
     /// <param name="spectatedTeam"></param>
     public void UpdateSpectate(int spectatingTeam, int spectatedTeam)
     {
+        if (RaceManager.Instance.IsRaceOver)
+        {
+            return;
+        }
+
         if (TeamManager.Instance.IndicesOfTeamsOnThisClient.Contains(spectatingTeam))
         {
             int localTeamIdx = TeamManager.Instance.IndicesOfTeamsOnThisClient.IndexOf(spectatingTeam);
@@ -583,14 +703,6 @@ public class RaceUIManager : MonoBehaviour
     #endregion
 
     #region OtherGeneralFunctions
-    /// <summary>
-    /// Deactivates all race UI
-    /// </summary>
-    public void DeactivateAllUI()
-    {
-        endOfRace.CanvasGroup.gameObject.SetActive(false);
-    }
-
     public void SetSplitScreenActive(bool val)
     {
         SetSplitLineActive(val);
@@ -624,6 +736,76 @@ public class RaceUIManager : MonoBehaviour
     #endregion
 
     #region Mouse UI
+    private void DisplayMouseUIIfNeeded()
+    {
+        int mouseUiTeam = 0;
+        int mouseUiPlayer = 1;
+        bool displayMouseUi = false;
+
+        if (MenuData.LobbyScreenData.ControllerSetup.LocalMenuTeams != null)
+        {
+            int localTeams = TeamManager.Instance.TeamsOnThisClient;
+            for (int index = 0; index < localTeams; index++)
+            {
+                MenuTeam team = MenuData.LobbyScreenData.ControllerSetup.LocalMenuTeams[index];
+                int teamIndex = TeamManager.Instance.IndicesOfTeamsOnThisClient[index];
+
+                if (team == null)
+                {
+                    continue;
+                }
+
+                ControllerLayout.LayoutStyle layout = team.Layout;
+                CharacterContent cc = TeamManager.Instance.GetTeamCharacterContent(teamIndex);
+                PlayerInput[] PIs = cc.GetPlayerInputs();
+
+                for (int i = 0; i < 2; i++) // for both players
+                {
+                    int playerNumber = i + 1;
+                    PlayerInput pi = PIs[i];
+                    bool isUsingMouse = false;
+                    // Should the mouse be displayed?
+                    if (!displayMouseUi && pi.Player != null)   // if mouse ui player has not already been found only then continue
+                    {
+                        if (pi.Player.controllers.hasMouse)
+                        {
+                            // Is this player a separate layout?
+                            if (layout == ControllerLayout.LayoutStyle.Separate)
+                            {
+                                // Using left hand layout for single character?
+                                if (SaveManager.Instance.loadedSave.OptionsMenuData.UseLeftLayoutForSingleCharacter)
+                                {
+                                    isUsingMouse = SaveManager.Instance.loadedSave.OptionsMenuData.IsP1UsingMouseMovement;
+                                }
+                                // Using right hand layout for single character?
+                                else if (SaveManager.Instance.loadedSave.OptionsMenuData.UseRightLayoutForSingleCharacter)
+                                {
+                                    isUsingMouse = SaveManager.Instance.loadedSave.OptionsMenuData.IsP2UsingMouseMovement;
+                                }
+                            }
+                            else    // the layout is shared. In this case, only one side can use mouse movement, so we just use that
+                            {
+                                isUsingMouse = playerNumber == 1 ? SaveManager.Instance.loadedSave.OptionsMenuData.IsP1UsingMouseMovement : SaveManager.Instance.loadedSave.OptionsMenuData.IsP2UsingMouseMovement;
+                            }
+
+                            if (isUsingMouse)
+                            {
+                                Debug.Log("using mouse: player " + playerNumber + " of team " + teamIndex);
+                                displayMouseUi = true;
+                                mouseUiTeam = teamIndex;
+                                mouseUiPlayer = playerNumber;
+                            }
+                        }
+                    }
+
+                    pi.SetIsUsingMouse(isUsingMouse);
+                }
+            }
+
+        }
+
+        UseMouseJoystickUI(displayMouseUi, mouseUiTeam, mouseUiPlayer);
+    }
     public void UseMouseJoystickUI(bool isActive, int team, int player)
     {
         if (team < 0 || player <= 0) return;
@@ -642,14 +824,27 @@ public class RaceUIManager : MonoBehaviour
     {
         if (paused)
         {
-            Cursor.lockState = CursorLockMode.None;
-            Cursor.visible = true;
+            ShowCursor();
         }
         else
         {
-            Cursor.lockState = CursorLockMode.Locked;
-            Cursor.visible = false;
+            HideCursor();
         }
+    }
+
+    private void ShowCursor()
+    {
+        MetaManager.Instance.CursorHandler.SetToShowCursorWhenPossible();
+    }
+
+    private void HideCursor()
+    {
+        if (RaceManager.Instance.IsPaused)
+        {
+            return;
+        }
+
+        MetaManager.Instance.CursorHandler.SetToHideCursor();
     }
 
     public void SetMouseInput(Vector2 stickInput)
@@ -661,8 +856,7 @@ public class RaceUIManager : MonoBehaviour
     private void OnDestroy()
     {
         // Fail safe to display the cursor
-        Cursor.lockState = CursorLockMode.None;
-        Cursor.visible = true;
+        ShowCursor();
 
         // =================== PRE RACE =================== //
 
@@ -676,7 +870,12 @@ public class RaceUIManager : MonoBehaviour
 
         RaceManager.Instance.OnRaceBegin -= OnRaceBegin;
 
-        RaceManager.Instance.OnTeamWin -= OnTeamFinishedRace;
+        if (currentGameModeScript != null && currentHUDCounter != null)
+        {
+            currentGameModeScript.OnCollectableCountUpdated -= currentHUDCounter.UpdateCounter;
+        }
+
+        RaceManager.Instance.OnTeamFinishedLevel -= OnTeamFinishedRace;
 
         // =================== RACE FINISH =================== //
         RaceManager.Instance.OnRaceFinish -= OnRaceFinish;
@@ -684,6 +883,11 @@ public class RaceUIManager : MonoBehaviour
         // =================== GENERAL =================== //
 
         RaceManager.Instance.OnGamePaused -= OnPaused;
-
+        PopUpNotification.OnPopUpShown -= ShowCursor;
+        PopUpNotification.OnPopUpDismissed -= HideCursor;
+        if (SaveManager.Instance != null)
+        {
+            SaveManager.Instance.OnMouseAndKeyboardButtonsChanged -= DisplayMouseUIIfNeeded;
+        }
     }
 }

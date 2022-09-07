@@ -2,14 +2,20 @@
 #define DISABLESTEAMWORKS
 # endif
 
+using ExitGames.Client.Photon;
+using Fling.Achievements;
+using Fling.DLC;
+using Fling.GameModes;
+using Fling.Levels;
+using Fling.Localization;
+using Fling.Saves;
+using Photon.Pun;
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.SceneManagement;
-using Fling.Levels;
-using Fling.Saves;
-using Photon.Pun;
-using Fling.GameModes;
+using Photon.Realtime;
+using Menus;
 
 #if !DISABLESTEAMWORKS
 using Steamworks;
@@ -22,26 +28,38 @@ public class MetaManager : Photon.Pun.MonoBehaviourPunCallbacks {
     /// </summary>
     public static MetaManager Instance { get; set; }
 
-    private bool loadingNewScene = false;
-    private bool isConnecting = false;
-    public const int MAX_PLAYERS = 20;
+    public bool LoadingNewScene { get; private set; } = false;
 
-    [TextArea]
-    public string GameVersion;
-    private string signUpURL = "https://t.co/PzVm5H62yr";                       
-    private string twitterURL = "https://twitter.com/SplitSideGames";
-    private string facebookURL = "https://www.facebook.com/SplitSideGames/";
-    private string youtubeURL = "https://www.youtube.com/channel/UCf9sFb93w10epTmr-k4CJnQ";
-    private string discordJoinURL = "https://discord.gg/DCe9cfk";
-    private string splitsideGamesWebsiteURL = "https://www.splitsidegames.com/";
-    private string kickstarterPageURL = "https://www.splitsidegames.com/kickstarter";
+    //[TextArea]
+    //public string GameVersion;
 
-#if !DISABLESTEAMWORKS
-    [HideInInspector]
-    public AppId_t BaseGameSteamAppID = (AppId_t)1054430;
-#endif
+    [SerializeField] private GameVersion gameVersion;
+    public GameVersion GameVersion => gameVersion;
 
+    public bool Initialized { get; private set; }
+
+    /// <summary>
+    /// The current platform (Steam, Switch, etc.)
+    /// </summary>
+    public Platform CurrentPlatform { get; private set; }
+
+    #region URLs
+    private const string SIGN_UP_URL = "https://t.co/PzVm5H62yr";                       
+    private const string TWITTER_URL = "https://twitter.com/SplitSideGames";
+    private const string FACEBOOK_URL = "https://www.facebook.com/SplitSideGames/";
+    private const string YOUTUBE_URL = "https://www.youtube.com/channel/UCf9sFb93w10epTmr-k4CJnQ";
+    private const string DISCORD_JOIN_URL = "https://discord.gg/DCe9cfk";
+    private const string SPLITSIDE_WEBSITE_URL = "https://www.splitsidegames.com/";
+    private const string KICKSTARTER_PAGE_URL = "https://www.splitsidegames.com/kickstarter";
+    private const string STEAM_STORE_PAGE_URL = "https://store.steampowered.com/app/1054430/Fling_to_the_Finish/";
+    #endregion
+
+    #region LevelsAndWorlds
     public List<LevelScriptableObject> AllLevels { get; private set; }
+    /// <summary>
+    /// List of all levels that are playable (in build index. locked levels are also playable, unless they are demo locked)
+    /// </summary>
+    public List<LevelScriptableObject> allPlayableLevels { get; private set; }
     [SerializeField]
     private List<WorldScriptableObject> allWorlds;
     /// <summary>
@@ -51,6 +69,10 @@ public class MetaManager : Photon.Pun.MonoBehaviourPunCallbacks {
     {
         get { return allWorlds; }
     }
+
+    /// <summary>
+    /// Dictionary of all PLAYABLE worlds (excludes <see cref="WorldType.MISCELLANEOUS"/>)
+    /// </summary>
     public Dictionary<WorldType, WorldScriptableObject> AllWorldsDictionary { get; private set; }
 
     [Header("Miscellaneous levels")]
@@ -58,36 +80,6 @@ public class MetaManager : Photon.Pun.MonoBehaviourPunCallbacks {
     public LevelScriptableObject MainMenuScriptableObject { get { return mainMenuScriptableObject; } }
     [SerializeField] private LevelScriptableObject creditsRollScriptableObject;
     public LevelScriptableObject CreditsRollScriptableObject { get { return creditsRollScriptableObject; } }
-
-    [Header("Game Modes")]
-    [SerializeField]
-    private List<GameModeScriptableObject> AllGameModes;
-    /// <summary>
-    /// Dictionary of [ key = GameMode type, value = GameModeScriptableObject] for all game modes
-    /// </summary>
-    public Dictionary<GameMode, GameModeScriptableObject> AllGameModesDictionary { get; private set; }
-
-    [SerializeField]
-    private bool skipPreRaceTimer = false;
-    /// <summary>
-    /// Should use the start timer or no?
-    /// </summary>
-    public bool SkipPreRaceTimer { get { return skipPreRaceTimer; } }
-
-    [SerializeField] private bool skipPreRaceCutscene = true;
-    /// <summary>
-    /// Should display the pre race cutscene or no?
-    /// </summary>
-    public bool SkipPreRaceCutscene { get { return skipPreRaceCutscene; } }
-
-    [SerializeField]
-    private bool useSteam = false;
-    /// <summary>
-    /// Is Steam being used or not?
-    /// </summary>
-    public bool UseSteam { get { return useSteam; } }
-
-    [SerializeField] 
 
     /// <summary>
     /// The currently loaded game level
@@ -102,17 +94,45 @@ public class MetaManager : Photon.Pun.MonoBehaviourPunCallbacks {
     /// </summary>
     public LevelScriptableObject NextLevel { get; private set; }
 
+    public bool isInTutorialLevel { get; private set; }
+
+    /// <summary>
+    /// Returns whether the player is currently in a playable level (any level that isn't the main menu or credits etc.)
+    /// </summary>
+    public bool IsInPlayableLevel { get; private set; }
+
+    /// <summary>
+    /// Returns whether the current loaded scene is main menu or not
+    /// </summary>
+    public bool IsInMainMenu { get { return (SceneManager.GetActiveScene().name == MainMenuScriptableObject.SceneName); } }
+    #endregion
+
+    #region GameModes
+    [Header("Game Modes")]
+    [SerializeField]
+    private List<GameModeScriptableObject> AllGameModes;
+    /// <summary>
+    /// Dictionary of [ key = GameMode type, value = GameModeScriptableObject] for all game modes
+    /// </summary>
+    public Dictionary<GameMode, GameModeScriptableObject> AllGameModesDictionary { get; private set; }
+
     /// <summary>
     /// The current game mode
     /// </summary>
-    public GameMode CurrentGameMode { get; private set; }
+    public GameMode CurrentGameMode { get; private set; } = GameMode.Race;
     /// <summary>
     /// The GameModeScriptableObject for the CurrentGameMode
     /// </summary>
     public GameModeScriptableObject CurrentGameModeObject { get; private set; }
 
-    public bool isInTutorialLevel { get; private set; }
+    /// <summary>
+    /// Timer properties for the current game mode in the current level
+    /// </summary>
+    public RaceTimerPropertiesScriptableObject CurrentLevelGameModeTimerProperties { get; private set; }
+    #endregion
 
+    #region Miscellaneous
+    [Header("Miscellaneous")]
     [SerializeField]
     private LoadingScreenControl loadingScreenControl;
 
@@ -122,11 +142,53 @@ public class MetaManager : Photon.Pun.MonoBehaviourPunCallbacks {
     /// </summary>
     public PopUpNotification NotificationControl { get { return notificationControl; } }
 
-    /// <summary>
-    /// Returns whether the current loaded scene is main menu or not
-    /// </summary>
-    public bool IsInMainMenu { get { return (SceneManager.GetActiveScene().name == MainMenuScriptableObject.SceneName); } }
+    [SerializeField] private PrivacyPolicy privacyPolicy;
+    public PrivacyPolicy PrivacyPolicy => privacyPolicy;
 
+    [SerializeField] private OnlineInformationNotifier onlineConnectivityNotifier;
+    [SerializeField] private GenericCanvasFader canvasGroupFader;
+    public GenericCanvasFader CanvasGroupFader => canvasGroupFader;
+
+    [SerializeField] private CursorHandler cursorHandler;
+    public CursorHandler CursorHandler => cursorHandler;
+
+    public bool IsChineseBuild { get; private set; } = false;
+    #endregion
+
+    #region Editor Overrides
+    [Header("Editor Play Overrides")]
+    [SerializeField]
+    private bool skipPreRaceTimer = false;
+    /// <summary>
+    /// Should use the start timer or no?
+    /// </summary>
+    public bool SkipPreRaceTimer { get { return skipPreRaceTimer; } }
+
+    [SerializeField] private bool skipPreRaceCutscene = true;
+    /// <summary>
+    /// Should display the pre race cutscene or no?
+    /// </summary>
+    public bool SkipPreRaceCutscene { get { return skipPreRaceCutscene; } }
+
+    [SerializeField] private GameMode gameModeInEditorPlay = GameMode.Race;
+    /// <summary>
+    /// GameMode to start a game from the editor play button in the level itself
+    /// </summary>
+    public GameMode GameModeInEditorPlay { get { return gameModeInEditorPlay; } }
+
+    [SerializeField]
+    private bool useSteam = false;
+    /// <summary>
+    /// Is Steam being used or not?
+    /// </summary>
+    public bool UseSteam { get { return useSteam; } }
+
+    [SerializeField] private Regions forceRegion = Regions.NONE;
+    /// <summary>
+    /// If a specific region should be connected to for testing in that region
+    /// </summary>
+    public Regions ForceRegion { get { return forceRegion; } set { forceRegion = value; } }
+    #endregion
 
     void Awake()
     {
@@ -140,32 +202,59 @@ public class MetaManager : Photon.Pun.MonoBehaviourPunCallbacks {
             Destroy(gameObject);
         }
 
-        loadingNewScene = false;
-        PhotonNetwork.AutomaticallySyncScene = true;
+        Initialized = false;
+        LoadingNewScene = false;
+        PhotonNetwork.AutomaticallySyncScene = false;
         if (!PhotonNetwork.IsConnected) {
             PhotonNetwork.OfflineMode = true;        // by default, start offline
         }
     }
 
-    void Start()
+    IEnumerator Start()
     {
         // Change PhotonView number as to not be destroyed ever again
         // photonView.ViewID = 999;
+        CurrentPlatform = Platform.Steam;
+        // Initialize leaderboard manager
+        LeaderboardManager.Init(CurrentPlatform);
+        AchievementsManager.Instance.Init(CurrentPlatform);
+        DLCManager.Instance.Init(CurrentPlatform);
+
+        // Initialize analytics manager
+        AnalyticsManager.Init();
+        onlineConnectivityNotifier.Init();
 
         // Handle event subscription
         SceneManager.sceneLoaded += OnNewSceneLoad;
-        
+
+        PhotonNetwork.NetworkingClient.EventReceived += LoadGameLevelUsingLevelNameEvent;
+        PhotonNetwork.NetworkingClient.EventReceived += LoadGameLevelUsingSceneIndexEvent;
+        PhotonNetwork.NetworkingClient.EventReceived += LoadMainMenuEvent;
+#if !DISABLESTEAMWORKS
+        SteamScript.Instance.OnGameJoinRequested += TryJoinRoom;
+#endif
+
         // Make the AllWorldsDictionary and AllLevels list
         AllWorldsDictionary = new Dictionary<WorldType, WorldScriptableObject>();
         AllLevels = new List<LevelScriptableObject>();
+        allPlayableLevels = new List<LevelScriptableObject>();
 
         foreach(WorldScriptableObject thisWorld in allWorlds)
         {
-            AllWorldsDictionary.Add(thisWorld.World, thisWorld);
+            if (thisWorld.World != WorldType.MISCELLANEOUS)
+            {
+                AllWorldsDictionary.Add(thisWorld.World, thisWorld);
+            }
 
             foreach (LevelScriptableObject level in thisWorld.Levels)
             {
+                level.InitValues();
                 AllLevels.Add(level);
+
+                if ((!DemoManager.Instance.IsDemo || !DemoManager.Instance.IsLevelDemoLocked(level)) && level.World != WorldType.MISCELLANEOUS)
+                {
+                    allPlayableLevels.Add(level);
+                }
             }
         }
 
@@ -176,17 +265,35 @@ public class MetaManager : Photon.Pun.MonoBehaviourPunCallbacks {
             AllGameModesDictionary.Add(mode.Mode, mode);
         }
 
-        SaveManager.Instance.allLevels = AllLevels;
-
         if (CurrentLevel == null)
         {
-            Debug.LogWarning("Boio, I needed to enter this block of code. Good error catch hooo");
-            if (SceneManager.GetActiveScene().name != MainMenuScriptableObject.SceneName)
+            if (SceneManager.GetActiveScene().name != MainMenuScriptableObject.SceneName &&
+                SceneManager.GetActiveScene().name != CreditsRollScriptableObject.SceneName)
             {
+                Debug.Log("<color=green>PLAY MODE ENTERED FROM LEVEL IN EDITOR. Setting desired properties.</color>");
+
                 CurrentLevel = GetCurrentLevel(SceneManager.GetActiveScene());
                 //NextLevel = GetLevelAfter(CurrentLevel);
                 NextLevel = GetDemoUnlockedLevelAfter(CurrentLevel);        // get the next level that is not permalocked in demos. Since demo permalocked levels are pretty much non-existent in the demo, we should get the next level by making sure it's not locked in demos
                 PreviousLevel = GetLevelBefore(CurrentLevel);
+
+                MenuData.LevelSelectData.GameMode = gameModeInEditorPlay;
+                if (gameModeInEditorPlay != GameMode.Race && gameModeInEditorPlay != GameMode.NONE)
+                {
+                    MenuData.MainMenuData.PlayType = MenuData.PlayType.Campaign;
+                }
+                else
+                {
+                    MenuData.MainMenuData.PlayType = MenuData.PlayType.Race;
+                }
+                UpdateGameModeRelatedProperties(gameModeInEditorPlay);
+
+                OnNewPlayableLevelLoaded?.Invoke(CurrentLevel, CurrentGameMode);
+                IsInPlayableLevel = true;
+            }
+            else
+            {
+                IsInPlayableLevel = false;
             }
         }
 
@@ -198,42 +305,61 @@ public class MetaManager : Photon.Pun.MonoBehaviourPunCallbacks {
         {
             isInTutorialLevel = false;
         }
+
+        // Wait until localization manager is ready
+        while (!LocalizationManager.Instance.IsReady)
+        {
+            yield return null;
+        }
+
+        while (!SteamScript.Initialized)
+        {
+            yield return null;
+        }
+
+        NetworkManager.Instance.OnDisconnectedFromNetwork += OnDisconnectedFromNetwork;
+        Initialized = true;
     }
 
+    public static event System.Action<LevelScriptableObject, GameMode> OnNewPlayableLevelLoaded;
     void OnNewSceneLoad(Scene scene, LoadSceneMode loadSceneMode)
     {
         // photonView.ViewID = 999;
-        loadingNewScene = false;
+        LoadingNewScene = false;
+        IsInPlayableLevel = false;
+        isInTutorialLevel = false;
+        PhotonNetwork.IsMessageQueueRunning = true;
 
-        if (SceneManager.GetActiveScene().name == MainMenuScriptableObject.SceneName)
+        NetworkManager.Instance.ClientLoaded();     // tell the network manager that this player has finished loading
+        CurrentLevel = GetCurrentLevel(scene);
+
+        if (SceneManager.GetActiveScene().name == MainMenuScriptableObject.SceneName ||
+            SceneManager.GetActiveScene().name == creditsRollScriptableObject.SceneName)
         {
             return;
         }
 
-        CurrentLevel = GetCurrentLevel(scene);
 
         if (CurrentLevel == null)
         {
             Debug.LogWarning("<color = orange>Something's not right. Are you sure the current scene is in the All Worlds list?</color>");
             isInTutorialLevel = false;
+            IsInPlayableLevel = false;
         }
         else
         {
             NextLevel = GetDemoUnlockedLevelAfter(CurrentLevel);
             PreviousLevel = GetLevelBefore(CurrentLevel);
             isInTutorialLevel = CurrentLevel.SaveName.Equals("DesertTutorial") ? true : false;
+            IsInPlayableLevel = true;
         }
 
-        CurrentGameMode = MenuData.LevelSelectData.GameMode;
-        if (CurrentGameMode != GameMode.NONE)
+        UpdateGameModeRelatedProperties(MenuData.LevelSelectData.GameMode);
+
+        if (CurrentLevel != CreditsRollScriptableObject)
         {
-            if (AllGameModesDictionary.ContainsKey(CurrentGameMode))
-            {
-                CurrentGameModeObject = AllGameModesDictionary[CurrentGameMode];
-            }
+            OnNewPlayableLevelLoaded?.Invoke(CurrentLevel, CurrentGameMode);
         }
-
-        NetworkManager.Instance.ClientLoaded();     // tell the network manager that this player has finished loading
     }
 
 
@@ -251,7 +377,35 @@ public class MetaManager : Photon.Pun.MonoBehaviourPunCallbacks {
     public void LoadGameLevel(int level)
     {
         CurrentLevel = null;
+
+        if (PhotonNetwork.OfflineMode)
+        {
+            LoadGameLevelUsingSceneIndex(level);
+        }
+        else
+        {
+            Photon.Realtime.RaiseEventOptions reo = new Photon.Realtime.RaiseEventOptions { Receivers = Photon.Realtime.ReceiverGroup.All };
+            SendOptions so = new SendOptions { Reliability = true };
+
+            // KEEP IN MIND: We don't use the NetworkManager.Instance to get the event code because it's a const - it will NEVER change
+            PhotonNetwork.RaiseEvent(NetworkManager.LOAD_LEVEL_USING_SCENE_INDEX_EVCODE, new object[] { level }, reo, so);
+        }
+    }
+
+    private void LoadGameLevelUsingSceneIndex(int level)
+    {
         StartCoroutine(LoadGameLevelCoroutine(level));
+    }
+
+    private void LoadGameLevelUsingSceneIndexEvent(EventData eventData)
+    {
+        if (eventData.Code == NetworkManager.LOAD_LEVEL_USING_SCENE_INDEX_EVCODE)
+        {
+            object[] content = (object[])eventData.CustomData;
+            int level = (int)content[0];
+
+            LoadGameLevelUsingSceneIndex(level);
+        }
     }
 
     /// <summary>
@@ -261,43 +415,62 @@ public class MetaManager : Photon.Pun.MonoBehaviourPunCallbacks {
     public void LoadGameLevel(string level)
     {
         CurrentLevel = null;
-        StartCoroutine(LoadGameLevelCoroutine(level));
+
+        if (PhotonNetwork.OfflineMode)
+        {
+            LoadGameLevelUsingLevelName(level);
+        }
+        else
+        {
+            Photon.Realtime.RaiseEventOptions reo = new Photon.Realtime.RaiseEventOptions { Receivers = Photon.Realtime.ReceiverGroup.All };
+            SendOptions so = new SendOptions { Reliability = true };
+
+            // KEEP IN MIND: We don't use the NetworkManager.Instance to get the event code because it's a const - it will NEVER change
+            PhotonNetwork.RaiseEvent(NetworkManager.LOAD_LEVEL_USING_SCENE_NAME_EVCODE, new object[] { level }, reo, so);
+        }
     }
 
     /// <summary>
     /// Loads a game level. Fades the screen to black as a transition.
     /// </summary>
     /// <param name="level">LevelScriptableObject level to load</param>
-    public void LoadGameLevel(LevelScriptableObject level)
+    public void LoadGameLevel(LevelScriptableObject level, bool evenIfLocked = false)
     {
-        if (SaveManager.Instance.IsLevelUnlocked(level))
+        if (evenIfLocked || SaveManager.Instance.IsLevelUnlocked(level, MenuData.MainMenuData.PlayType))
         {
-            isConnecting = true;
             CurrentLevel = level;
-            //if (PhotonNetwork.OfflineMode) {
-                StartCoroutine(LoadGameLevelCoroutine(level.SceneName));
-            //}
-            /*else {
-                if (PhotonNetwork.IsConnected && PhotonNetwork.IsMasterClient) {
-                    Debug.Log("Loading level!");
-                    PhotonNetwork.AutomaticallySyncScene = true;    // sync scene
-                    PhotonNetwork.LoadLevel(level.SceneName);
-                    // #Critical we need at this point to attempt joining a Random Room. If it fails, we'll get notified in OnJoinRandomFailed() and we'll create one.
-                    //Photon.Pun.PhotonNetwork.JoinRandomRoom();
-                }
-                else {
+            if (PhotonNetwork.OfflineMode)
+            {
+                LoadGameLevelUsingLevelName(level.SceneName);
+            }
+            else
+            {
+                Photon.Realtime.RaiseEventOptions reo = new Photon.Realtime.RaiseEventOptions { Receivers = Photon.Realtime.ReceiverGroup.All };
+                SendOptions so = new SendOptions { Reliability = true };
 
-                    /*Debug.Log("Connecting..."); // LogFeedback("Connecting...");
-                    
-                    // #Critical, we must first and foremost connect to Photon Online Server.
-                    Photon.Pun.PhotonNetwork.GameVersion = GameVersion;
-                    Photon.Pun.PhotonNetwork.ConnectUsingSettings();
-                }
-            }*/
+                // KEEP IN MIND: We don't use the NetworkManager.Instance to get the event code because it's a const - it will NEVER change
+                PhotonNetwork.RaiseEvent(NetworkManager.LOAD_LEVEL_USING_SCENE_NAME_EVCODE, new object[] { level.SceneName }, reo, so);
+            }
         }
         else
         {
             Debug.Log("Level Not Unlocked");
+        }
+    }
+
+    private void LoadGameLevelUsingLevelName(string level)
+    {
+        StartCoroutine(LoadGameLevelCoroutine(level));
+    }
+
+    private void LoadGameLevelUsingLevelNameEvent(EventData eventData)
+    {
+        if (eventData.Code == NetworkManager.LOAD_LEVEL_USING_SCENE_NAME_EVCODE)
+        {
+            object[] content = (object[])eventData.CustomData;
+            string level = (string)content[0];
+
+            LoadGameLevelUsingLevelName(level);
         }
     }
 
@@ -308,22 +481,11 @@ public class MetaManager : Photon.Pun.MonoBehaviourPunCallbacks {
     /// <param name="level">Index of level to load</param>
     private IEnumerator LoadGameLevelCoroutine(int level)
     {
-        /*if (!loadingNewScene)
+        if (!LoadingNewScene)
         {
-
-            // fix time
-            Time.timeScale = 1f;
-            Time.fixedDeltaTime = Time.timeScale * 0.02f;
-
-            loadingNewScene = true;
-            float fadeTime = GetComponent<Fade>().BeginFade(1);
-            yield return new WaitForSeconds(fadeTime);
-            SceneManager.LoadScene(level);
-        }*/
-
-        if (!loadingNewScene)
-        {
+            bool isOnline = !PhotonNetwork.OfflineMode;
             NetworkManager.Instance.LoadingNewLevel();      // tell NetworkManager.cs that a new level has started loading
+
             if (OnNewLevelLoadStarted != null)
             {
                 OnNewLevelLoadStarted();
@@ -334,37 +496,29 @@ public class MetaManager : Photon.Pun.MonoBehaviourPunCallbacks {
             Time.timeScale = 1f;
             Time.fixedDeltaTime = Time.timeScale * 0.02f;
 
-            loadingNewScene = true;
+            LoadingNewScene = true;
             //float fadeTime = GetComponent<Fade>().BeginFade(1);
             yield return new WaitForSeconds(loadingScreenControl.StartLoadTime);
 
-            if (PhotonNetwork.OfflineMode)
+            AsyncOperation operation = SceneManager.LoadSceneAsync(level);
+
+            while (!operation.isDone)
             {
-                AsyncOperation operation = SceneManager.LoadSceneAsync(level);
+                float progress = operation.progress;
 
-                while (!operation.isDone)
-                {
-                    float progress = operation.progress;
-
-                    yield return null;
-                }
+                yield return null;
             }
-            else
+
+            if (isOnline)
             {
-                PhotonNetwork.AutomaticallySyncScene = true;
-                if (PhotonNetwork.IsMasterClient) {
-                    Debug.Log("Loading level");
-                    PhotonNetwork.LoadLevel(level);
-                }
-
-                while (PhotonNetwork.LevelLoadingProgress < 1.0f)
-                {
-                    yield return null;
-                }
-
                 while (!NetworkManager.Instance.AllClientsLoaded)
                 {
                     yield return null;
+                }
+
+                if (IsInPlayableLevel)
+                {
+                    yield return WaitUntilOnlineRaceCanStart();
                 }
             }
 
@@ -379,8 +533,9 @@ public class MetaManager : Photon.Pun.MonoBehaviourPunCallbacks {
     /// <param name="level">Name of scene to load</param>
     private IEnumerator LoadGameLevelCoroutine(string level)
     {
-        if (!loadingNewScene)
+        if (!LoadingNewScene)
         {
+            bool isOnline = !PhotonNetwork.OfflineMode;
             NetworkManager.Instance.LoadingNewLevel();      // tell NetworkManager.cs that a new level has started loading
 
             if (OnNewLevelLoadStarted != null)
@@ -394,40 +549,48 @@ public class MetaManager : Photon.Pun.MonoBehaviourPunCallbacks {
             Time.timeScale = 1f;
             Time.fixedDeltaTime = Time.timeScale * 0.02f;
 
-            loadingNewScene = true;
+            LoadingNewScene = true;
             //float fadeTime = GetComponent<Fade>().BeginFade(1);
             yield return new WaitForSeconds(loadingScreenControl.StartLoadTime);
 
-            if (PhotonNetwork.OfflineMode) {
-                AsyncOperation operation = SceneManager.LoadSceneAsync(level);
+            AsyncOperation operation = SceneManager.LoadSceneAsync(level);
 
-                while (!operation.isDone)
-                {
-                    float progress = operation.progress;
+            PhotonNetwork.IsMessageQueueRunning = false;
+            while (!operation.isDone)
+            {
+                float progress = operation.progress;
 
-                    yield return null;
-                }
+                yield return null;
             }
-            else {
-                PhotonNetwork.AutomaticallySyncScene = true;
-                if (PhotonNetwork.IsMasterClient) {
-                    Debug.Log("Loading level");
-                    PhotonNetwork.LoadLevel(level);
-                }
+            PhotonNetwork.IsMessageQueueRunning = true;
 
-                while (PhotonNetwork.LevelLoadingProgress < 1.0f)
-                {
-                    yield return null;
-                }
-
+            if (isOnline)
+            {
                 while (!NetworkManager.Instance.AllClientsLoaded)
                 {
                     yield return null;
                 }
+
+                if (IsInPlayableLevel)
+                {
+                    yield return WaitUntilOnlineRaceCanStart();
+                }
             }
 
             loadingScreenControl.EndLoading();
+        }
+    }
 
+    private IEnumerator WaitUntilOnlineRaceCanStart()
+    {
+        while (RaceManager.Instance == null)
+        {
+            yield return null;
+        }
+
+        while (!RaceManager.Instance.HasOnlineRaceSyncedTimerBeenHit)
+        {
+            yield return null;
         }
     }
 
@@ -440,8 +603,8 @@ public class MetaManager : Photon.Pun.MonoBehaviourPunCallbacks {
     {
         if (CurrentLevel != null)
         {
-            // LoadGameLevel(CurrentLevel);
-            StartCoroutine(LoadGameLevelCoroutine(CurrentLevel.SceneName));
+            LoadGameLevel(CurrentLevel);
+            //StartCoroutine(LoadGameLevelCoroutine(CurrentLevel.SceneName));
         }
         else
         {
@@ -474,20 +637,40 @@ public class MetaManager : Photon.Pun.MonoBehaviourPunCallbacks {
     /// </summary>
     public void LoadMainMenu(Menus.MenuState menuState)
     {
-        /*if (RaceManager.Instance != null) {
-            if (RaceManager.Instance.IsPaused) {
-                RaceManager.Instance.TogglePauseMenu();
-            }
-        }*/
+        if (PhotonNetwork.OfflineMode)
+        {
+            LoadMainMenuLogic((int)menuState);
+        }
+        else
+        {
+            Photon.Realtime.RaiseEventOptions reo = new Photon.Realtime.RaiseEventOptions { Receivers = Photon.Realtime.ReceiverGroup.All };
+            SendOptions so = new SendOptions { Reliability = true };
 
-        if (menuState < Menus.MenuState.LOBBY_SCREEN)
+            // KEEP IN MIND: We don't use the NetworkManager.Instance to get the event code because it's a const - it will NEVER change
+            PhotonNetwork.RaiseEvent(NetworkManager.LOAD_MAIN_MENU_EVCODE, new object[] { (int)menuState }, reo, so);
+        }
+    }
+
+    public void LoadMainMenuLogic(int menuState)
+    {
+        Menus.MenuState menuStateEnum = (Menus.MenuState)menuState;
+        if (menuStateEnum < Menus.MenuState.LOBBY_SCREEN)
         {
             MenuData.LobbyScreenData.ResetLobbyData();
         }
 
-        StartCoroutine(MainMenuStateCoroutine(menuState));
+        StartCoroutine(MainMenuStateCoroutine(menuStateEnum));
+    }
 
-        //LoadGameLevel(0);
+    private void LoadMainMenuEvent(EventData eventData)
+    {
+        if (eventData.Code == NetworkManager.LOAD_MAIN_MENU_EVCODE)
+        {
+            object[] content = (object[])eventData.CustomData;
+            int menuState = (int)content[0];
+
+            LoadMainMenuLogic(menuState);
+        }
     }
 
     /// <summary>
@@ -502,25 +685,16 @@ public class MetaManager : Photon.Pun.MonoBehaviourPunCallbacks {
     /// Waits for main menu to load in couroutine, then sets the main menu to a certain state.
     /// </summary>
     private IEnumerator MainMenuStateCoroutine(Menus.MenuState menuState) {
-        /*Scene currentScene = SceneManager.GetActiveScene();
-        int buildIndex = currentScene.buildIndex;
-
-        while (buildIndex != 0) {
-            currentScene = SceneManager.GetActiveScene();
-            buildIndex = currentScene.buildIndex;
-            yield return 0;
-        }*/
         yield return StartCoroutine(LoadGameLevelCoroutine(mainMenuScriptableObject.SceneName));
 
-        if (PhotonNetwork.OfflineMode)
-        {
+        //if (PhotonNetwork.OfflineMode)
+        //{
             Menus.MenuManager.Instance.MoveToMenuState(menuState);
-        }
-        else
-        {
-            Menus.MenuManager.Instance.GetComponent<PhotonView>().RPC("MoveToMenuState", RpcTarget.All, (int)menuState);
-        }
-        
+        //}
+        //else
+        //{
+        //    Menus.MenuManager.Instance.GetComponent<PhotonView>().RPC("MoveToMenuState", RpcTarget.All, (int)menuState);
+        //}
 
         yield return 0;
     }
@@ -534,7 +708,7 @@ public class MetaManager : Photon.Pun.MonoBehaviourPunCallbacks {
 
         nextLevel = NextLevel;
 
-        if (!SaveManager.Instance.IsLevelUnlocked(nextLevel))
+        if (!SaveManager.Instance.IsLevelUnlocked(nextLevel, MenuData.MainMenuData.PlayType))
         {
             // Is the level locked?
             // Get the next unlocked level
@@ -547,44 +721,107 @@ public class MetaManager : Photon.Pun.MonoBehaviourPunCallbacks {
     /// <summary>
     /// Loads a random level that has been unlocked
     /// </summary>
-    public void LoadRandomLevel()
+    public void LoadRandomLevel(bool loadEvenIfLocked = false, bool loadTutorial = false)
     {
-        Random.seed = System.DateTime.Now.Millisecond;
-        LevelScriptableObject level = GetRandomLevel();
-        LoadGameLevel(level);
+        Random.InitState(System.DateTime.Now.Millisecond);
+        LevelScriptableObject level = GetRandomLevel(loadTutorial);
+        LoadGameLevel(level, loadEvenIfLocked);
     }
 
-    private LevelScriptableObject GetRandomLevel()
+    public void LoadNextTournamentRace()
     {
-        LevelScriptableObject level = null;
-        while (level==null || level.World == WorldType.MISCELLANEOUS || !SaveManager.Instance.IsLevelUnlocked(level))
+        int highestPlayedIndex = SaveManager.Instance.LeastLevelNotPlayedIndex;
+        if (!PhotonNetwork.OfflineMode)
         {
-            if (level != null)
-            {
-                if (level.World == WorldType.MISCELLANEOUS)
-                {
-                    Debug.Log("Level: " + level.Name + " | Not a race track... finding another level");
-                }
-                else if (!SaveManager.Instance.IsLevelUnlocked(level))
-                {
-                    Debug.Log("Level: " + level.Name + " | Level is locked... finding another level");
-                }
-            }
+            highestPlayedIndex = NetworkManager.Instance.LeastCommonLevelNotPlayedInCurrentRoom;
+        }
 
-            level = AllLevels[Random.Range(0, AllLevels.Count)];
+        int levelToPlay = highestPlayedIndex;
+        if (levelToPlay >= allPlayableLevels.Count) // all players have played all levels
+        {
+            // load any random level
+            LoadRandomLevel(true);
+        }
+        else
+        {
+            LevelScriptableObject level = allPlayableLevels[levelToPlay];
+            LoadGameLevel(level, true);
+        }
+    }
+
+    /// <summary>
+    /// Gets a random level.
+    /// </summary>
+    /// <param name="canBeTutorial">Should tutorial be returned as a random level or not?</param>
+    /// <returns></returns>
+    private LevelScriptableObject GetRandomLevel(bool canBeTutorial)
+    {
+        int startIdx = 0;
+        if (!canBeTutorial)
+        {
+            startIdx = 1;
+        }
+        
+        int allLevelCount = allPlayableLevels.Count;
+        LevelScriptableObject level = null;
+        while (level==null || level.World == WorldType.MISCELLANEOUS || level == CurrentLevel)
+        {
+            level = allPlayableLevels[Random.Range(startIdx, allLevelCount)];
         }
 
         return level;
     }
-#endregion
+    #endregion
 
-#region LOAD_EXTERNAL_LINKS
+    #region INVITES
+    private void TryJoinRoom(string rmCode)
+    {
+        if (IsInMainMenu)
+        {
+            // handled by lobby screen!
+            return;
+        }
+
+        if (!PhotonNetwork.OfflineMode)
+        {
+            NetworkManager.Instance.Disconnect(() => TryJoinRoom(rmCode));
+        }
+        else
+        {
+            MenuData.MainMenuData.InviteRoomCode = rmCode;
+            LoadMainMenu();
+        }
+    }
+    #endregion
+
+    #region ONLINE
+    private void OnDisconnectedFromNetwork(DisconnectCause cause)
+    {
+        if (cause == DisconnectCause.DisconnectByClientLogic)
+        {
+            return; // if disconnected by player then we don't want to show disconnected message!
+        }
+        if (IsInMainMenu)
+        {
+            if (MenuManager.Is3DMenuState(MenuManager.Instance.CurrentMenuState))
+            {
+                // handled by 3d menus
+                return;
+            }
+
+            MenuData.LobbyScreenData.ResetLobbyData();
+        }
+
+        NotificationControl.ShowErrorMessage(ErrorCodes.DISCONNECTED, LoadMainMenu, null, extraDisconnectCause: cause);
+    }
+    #endregion
+    #region LOAD_EXTERNAL_LINKS
     /// <summary>
     /// Opens a browser with the sign up form
     /// </summary>
     public void OpenSignUp()
     {
-        Application.OpenURL(signUpURL);
+        Application.OpenURL(SIGN_UP_URL);
     }
 
     /// <summary>
@@ -592,7 +829,7 @@ public class MetaManager : Photon.Pun.MonoBehaviourPunCallbacks {
     /// </summary>
     public void OpenTwitter()
     {
-        Application.OpenURL(twitterURL);
+        Application.OpenURL(TWITTER_URL);
     }
 
     /// <summary>
@@ -600,7 +837,7 @@ public class MetaManager : Photon.Pun.MonoBehaviourPunCallbacks {
     /// </summary>
     public void OpenFacebook()
     {
-        Application.OpenURL(facebookURL);
+        Application.OpenURL(FACEBOOK_URL);
     }
 
     /// <summary>
@@ -608,7 +845,7 @@ public class MetaManager : Photon.Pun.MonoBehaviourPunCallbacks {
     /// </summary>
     public void OpenYouTube()
     {
-        Application.OpenURL(youtubeURL);
+        Application.OpenURL(YOUTUBE_URL);
     }
 
     /// <summary>
@@ -616,7 +853,7 @@ public class MetaManager : Photon.Pun.MonoBehaviourPunCallbacks {
     /// </summary>
     public void OpenDiscordJoin()
     {
-        Application.OpenURL(discordJoinURL);
+        Application.OpenURL(DISCORD_JOIN_URL);
     }
 
     /// <summary>
@@ -624,7 +861,7 @@ public class MetaManager : Photon.Pun.MonoBehaviourPunCallbacks {
     /// </summary>
     public void OpenKickstarterPage()
     {
-        Application.OpenURL(kickstarterPageURL);
+        Application.OpenURL(KICKSTARTER_PAGE_URL);
     }
 
     /// <summary>
@@ -632,9 +869,13 @@ public class MetaManager : Photon.Pun.MonoBehaviourPunCallbacks {
     /// </summary>
     public void OpenWebsite()
     {
-        Application.OpenURL(splitsideGamesWebsiteURL);
+        Application.OpenURL(SPLITSIDE_WEBSITE_URL);
     }
 
+    public void OpenStorePage()
+    {
+        Application.OpenURL(STEAM_STORE_PAGE_URL);
+    }
 #endregion
 
 #region LEVEL_SCRIPTABLEOBJECT_CODE
@@ -658,7 +899,7 @@ public class MetaManager : Photon.Pun.MonoBehaviourPunCallbacks {
     {
         LevelScriptableObject nextLevel = GetLevelAfter(level);
 
-        if (!SaveManager.Instance.IsLevelUnlocked(nextLevel))
+        if (!SaveManager.Instance.IsLevelUnlocked(nextLevel, MenuData.MainMenuData.PlayType))
         {
             return GetUnlockedLevelAfter(nextLevel);
         }
@@ -676,7 +917,7 @@ public class MetaManager : Photon.Pun.MonoBehaviourPunCallbacks {
         LevelScriptableObject nextLevel = GetLevelAfter(level);
 
         // If this is a demo (if not, this doesn't matter), and if the level is permalocked by the demo
-        if (DemoManager.Instance.isDemo && DemoManager.Instance.IsLevelDemoLocked(nextLevel))
+        if (DemoManager.Instance.IsDemo && DemoManager.Instance.IsLevelDemoLocked(nextLevel))
         {
             // Get the next level that is not demolocked
             return GetDemoUnlockedLevelAfter(nextLevel);
@@ -780,10 +1021,67 @@ public class MetaManager : Photon.Pun.MonoBehaviourPunCallbacks {
         return prevLevel;
     }
 
-#endregion
+    #endregion
+
+    #region GAMEMODE_RELATED_PROPERTIES
+    private void UpdateGameModeRelatedProperties(GameMode mode)
+    {
+        CurrentGameMode = mode;
+
+        if (CurrentGameMode != GameMode.NONE)
+        {
+            if (AllGameModesDictionary.ContainsKey(CurrentGameMode))
+            {
+                CurrentGameModeObject = AllGameModesDictionary[CurrentGameMode];
+            }
+
+            if (CurrentLevel.GameModeTimerProperties != null)
+            {
+                if (CurrentLevel.GameModeTimerProperties.ContainsKey(CurrentGameMode))
+                {
+                    CurrentLevelGameModeTimerProperties = CurrentLevel.GameModeTimerProperties[CurrentGameMode];
+                }
+                else
+                {
+                    Debug.LogError("Game mode timer properties not set for " + CurrentGameMode + " game mode in " + CurrentLevel.Name + "'s scriptable object");
+                }
+            }
+            else
+            {
+                Debug.LogError("Game mode timer properties array not set in " + CurrentLevel.Name + "'s scriptable object");
+            }
+        }
+    }
+    #endregion
+
+    public void ConvertToChineseBuild()
+    {
+        IsChineseBuild = true;
+    }
+
+    public void ConvertToROWBuild()
+    {
+        IsChineseBuild = false;
+    }
 
     void OnDestroy()
     {
         SceneManager.sceneLoaded -= OnNewSceneLoad;
+
+        PhotonNetwork.NetworkingClient.EventReceived -= LoadGameLevelUsingLevelNameEvent;
+        PhotonNetwork.NetworkingClient.EventReceived -= LoadGameLevelUsingSceneIndexEvent;
+        PhotonNetwork.NetworkingClient.EventReceived -= LoadMainMenuEvent;
+
+#if !DISABLESTEAMWORKS
+        if (SteamScript.Instance != null)
+        {
+            SteamScript.Instance.OnGameJoinRequested -= TryJoinRoom;
+        }
+#endif
+
+        if (NetworkManager.Instance != null)
+        {
+            NetworkManager.Instance.OnDisconnectedFromNetwork -= OnDisconnectedFromNetwork;
+        }
     }
 }

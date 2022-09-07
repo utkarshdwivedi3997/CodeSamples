@@ -3,19 +3,23 @@ using System.Collections.Generic;
 using UnityEngine;
 using Rewired;
 using Photon.Pun;
-using SettingsMenuManager = Menus.Settings.SettingsMenuManager;
 using Fling.Saves;
 using Menus;
+using System;
 
 public class PlayerInput : MonoBehaviourPun
 {
     private bool canSpectate = false;
     private bool allGameplayInputPaused = false;           // is all the input paused?
     private bool movementInputPaused = false;   // is just the movement input paused?
+    private bool isSelectingNumPlayersInMenu = false;
+    private bool lastFrameIsSelectingNumPlayersInMenu = false;
+
 
     private Coroutine movementInputPauseCoroutine = null;
 
     private Player player; //The Rewired Player
+    public Player Player => player;
     private float deadzone = 0.05f; //joystick deadzone to be used in a radial deadzone for player movement. (might remove if Rewired handles deadzones well).
 
     private PlayerMovement myPlayerMovement;
@@ -71,7 +75,16 @@ public class PlayerInput : MonoBehaviourPun
 
     private int inAirTugs = 0;
 
+    private CharacterContent.TeamInstanceType gameplayType = CharacterContent.TeamInstanceType.Gameplay;
+
+    public CharacterContent MyCharacterContent { get; set; }
+
     // Use this for initialization
+
+    public event Func<float, float, int, bool> OnMenuTeamSelectInput;
+    public event Action OnMenuTeamPickInput;
+    private float menuPlayerSelectTimer = 0f;
+    private float selectRefresh = 0.3f;
     void Start()
     {
         myPlayerMovement = GetComponent<PlayerMovement>();
@@ -95,69 +108,117 @@ public class PlayerInput : MonoBehaviourPun
 
         canSpectate = false;
 
-        RaceManager.Instance.OnRaceCountdownStarted += OnRaceCountdownStarted; 
-        RaceManager.Instance.OnTeamWin += FinishedRace;
+        if (RaceManager.Instance != null)
+        {
+            RaceManager.Instance.OnTeamFinishedLevel += FinishedRace;
+            RaceManager.Instance.OnRaceBegin += OnRaceBegin;
+            RaceManager.Instance.OnTeamDeath += TeamRespawned;
+        }
+        
+        PopUpNotification.OnPopUpShown += PopupShown;
+        PopUpNotification.OnPopUpDismissed += PopupDismissed;
     }
 
     // Update is called once per frame
     void Update()
     {
-        if (!PhotonNetwork.OfflineMode && !photonView.IsMine)
+        if (!PhotonNetwork.OfflineMode && PhotonNetwork.CurrentRoom != null && !photonView.IsMine)
         {
             return;
         }
 
-        if (canSpectate && player != null)
-        {
-            if (player.GetButtonDown("Spectate Left"))
-            {
-                myPlayerSpectate.SpectateLeft();
-            }
-
-            if (player.GetButtonDown("Spectate Right"))
-            {
-                myPlayerSpectate.SpectateRight();
-            }
-        }
-
         if (!allGameplayInputPaused && player != null)       // only take input if input is not paused
         {
-            if (player.GetButtonDown("Jump"))
+            if (gameplayType == CharacterContent.TeamInstanceType.Gameplay || !isSelectingNumPlayersInMenu)
             {
-                if (player.GetButton("Clamp"))
+                if (player.GetButtonDown("Jump"))
                 {
-                    myRopeManager.InputFling(playerNumber);
+                    if (player.GetButton("Clamp") && gameplayType == CharacterContent.TeamInstanceType.Gameplay)
+                    {
+                        // no flinging in menu
+                        myRopeManager.InputFling(playerNumber);
+                    }
+                    else
+                    {
+                        myPlayerMovement.InputJump(true);
+                    }
                 }
-                else
+                else if (player.GetButtonUp("Jump"))
                 {
-                    myPlayerMovement.InputJump(true);
+                    myPlayerMovement.InputJump(false);
                 }
-            }
-            else if (player.GetButtonUp("Jump"))
-            {
-                myPlayerMovement.InputJump(false);
             }
             if (player.GetButtonDown("Clamp"))
             {
                 myPlayerMovement.InputClamp(true);
-
-                // HACK for attractive video for PAX
-                // DemoManager.Instance.ResetTimer();
             }
             else if (player.GetButtonUp("Clamp"))
             {
                 myPlayerMovement.InputClamp(false);
             }
-            if (player.GetButtonDown("Tug"))
+            if (player.GetButtonDown("Tug") && gameplayType == CharacterContent.TeamInstanceType.Gameplay)
             {
+                // no flinging in menu
                 myRopeManager.InputFling(playerNumber);
             }
+
+            if (gameplayType == CharacterContent.TeamInstanceType.Menu && !lastFrameIsSelectingNumPlayersInMenu)
+            {
+                if (player.GetButtonDown("ChangeCharacterPrevious"))
+                {
+                    ChangeCharacter(-1);
+                }
+                else if (player.GetButtonDown("ChangeCharacterNext"))
+                {
+                    ChangeCharacter(1);
+                }
+                else if (player.GetButtonDown("ChangeSkinPrevious"))
+                {
+                    ChangeSkin(-1);
+                }
+                else if (player.GetButtonDown("ChangeSkinNext"))
+                {
+                    ChangeSkin(1);
+                }
+            }
+
+            if (gameplayType == CharacterContent.TeamInstanceType.Menu)
+            {
+                // menu specific inputs
+                float menuHorizontal = player.GetAxisRaw("Horizontal");
+                float menuVertical = player.GetAxisRaw("Vertical");
+
+                if (menuPlayerSelectTimer > selectRefresh)
+                {
+                    if (OnMenuTeamSelectInput != null)
+                    {
+                        if (OnMenuTeamSelectInput(menuHorizontal, menuVertical, teamIndex))
+                        {
+                            menuPlayerSelectTimer = 0f;
+                        }
+                    }
+                }
+                else
+                {
+                    menuPlayerSelectTimer += Time.deltaTime;
+                }
+
+                if (player.GetButtonDown("Pick"))
+                {
+                    OnMenuTeamPickInput?.Invoke();
+                }
+            }
+
         }
+
+        lastFrameIsSelectingNumPlayersInMenu = isSelectingNumPlayersInMenu;
     }
 
+    public bool InputtingMovement { get; private set; } = false;
+    public static event Action<int, int> OnMovementInputStarted, OnMovementInputStopped;
     private void FixedUpdate()
     {
-        if (!PhotonNetwork.OfflineMode && !photonView.IsMine)
+        if (!PhotonNetwork.OfflineMode && PhotonNetwork.CurrentRoom != null && !photonView.IsMine)
         {
             return;
         }
@@ -169,9 +230,9 @@ public class PlayerInput : MonoBehaviourPun
 
             if (isUsingMouse)
             {
-                float mouseSensitivity = 0.01f;
-                moveX *= mouseSensitivity;
-                moveZ *= mouseSensitivity;
+                const float mouseFriction = 0.01f;
+                moveX *= mouseFriction * SaveManager.Instance.loadedSave.OptionsMenuData.MouseSensitivity;
+                moveZ *= mouseFriction * SaveManager.Instance.loadedSave.OptionsMenuData.MouseSensitivity;
 
                 mouseXDelta = Mathf.Clamp(moveX + mouseXDelta, -1f, 1f);
                 mouseZDelta = Mathf.Clamp(moveZ + mouseZDelta, -1f, 1f);
@@ -182,9 +243,16 @@ public class PlayerInput : MonoBehaviourPun
 
             Vector2 stickInput = new Vector2(moveX, moveZ);
 
-            if (isUsingMouse && ScreenManager.Instance != null)
+            if (isUsingMouse)
             {
-                RaceManager.Instance.RaceUI.SetMouseInput(stickInput);
+                if (gameplayType == CharacterContent.TeamInstanceType.Gameplay)
+                {
+                    RaceManager.Instance.RaceUI.SetMouseInput(stickInput);
+                }
+                else
+                {
+                    MenuManager.Instance.ControllerAssigner.SetMouseInput(stickInput);
+                }
             }
 
             float actualDeadzone = isUsingMouse ? mouseDeadzone : deadzone;
@@ -194,17 +262,52 @@ public class PlayerInput : MonoBehaviourPun
 
                 myJoystickVisualization.InputJoystick(stickInput); //NEW, from Ryan 
 
-
-
-                // HACK for attractive video for PAX
-                // DemoManager.Instance.ResetTimer();
+                if (!InputtingMovement)
+                {
+                    InputtingMovement = true;
+                    OnMovementInputStarted?.Invoke(teamIndex, playerNumber);
+                }
             }
             else
             {
                 myJoystickVisualization.NoInput();
                 myPlayerMovement.SetInputting(false);
+
+                if (InputtingMovement)
+                {
+                    InputtingMovement = false;
+                    OnMovementInputStopped?.Invoke(teamIndex, playerNumber);
+                }
             }
         }
+    }
+
+    private void OnSpectateInputLeft(InputActionEventData data)
+    {
+        if (canSpectate)
+        {
+            myPlayerSpectate.SpectateLeft();
+        }
+    }
+
+    private void OnSpectateInputRight(InputActionEventData data)
+    {
+        if (canSpectate)
+        {
+            myPlayerSpectate.SpectateRight();
+        }
+    }
+
+    public event Action<int, int, int> OnTryChangeCharacter;
+    public event Action<int, int, int> OnTryChangeSkin;
+    private void ChangeCharacter(int direction)
+    {
+        OnTryChangeCharacter?.Invoke(TeamIndex, playerNumber, direction);
+    }
+
+    private void ChangeSkin(int direction)
+    {
+        OnTryChangeSkin?.Invoke(TeamIndex, playerNumber, direction);
     }
 
     public void Rumble(int motor, float strength, float duration)
@@ -223,6 +326,14 @@ public class PlayerInput : MonoBehaviourPun
         allGameplayInputPaused = true;
     }
 
+    public void ResumeAllInputIfPaused()
+    {
+        if (allGameplayInputPaused)
+        {
+            ResumeAllInput();
+        }
+    }
+
     /// <summary>
     /// Resume taking input from the player
     /// </summary>
@@ -234,7 +345,15 @@ public class PlayerInput : MonoBehaviourPun
             myPlayerMovement.ResumeAfterPause();
         }
 
-        StartCoroutine(ResumeAllInputAfterEndOfFrame());
+        if (gameObject.activeSelf)
+        {
+            StartCoroutine(ResumeAllInputAfterEndOfFrame());
+        }
+        else
+        {
+            allGameplayInputPaused = false;
+            movementInputPaused = false;
+        }
     }
 
     IEnumerator ResumeAllInputAfterEndOfFrame() {
@@ -253,6 +372,15 @@ public class PlayerInput : MonoBehaviourPun
         movementInputPaused = false;
     }
 
+    public void SetIsSelectingNumPlayersInMenu(bool isSelecting)
+    {
+        if (gameplayType == CharacterContent.TeamInstanceType.Gameplay)
+        {
+            isSelecting = false;
+        }
+
+        this.isSelectingNumPlayersInMenu = isSelecting;
+    }
     /// <summary>
     /// Pauses movement for given time
     /// </summary>
@@ -275,68 +403,17 @@ public class PlayerInput : MonoBehaviourPun
         ResumeMovementInput();
         movementInputPauseCoroutine = null;
     }
-    
-    private void OnRaceCountdownStarted()
+
+    private void OnRaceBegin()
     {
-        RaceManager.Instance.OnRaceCountdownStarted -= OnRaceCountdownStarted;
-        DisplayMouseUIIfNeeded();
-        SaveManager.Instance.OnMouseAndKeyboardButtonsChanged += DisplayMouseUIIfNeeded;
+        RaceManager.Instance.OnRaceBegin -= OnRaceBegin;
+
+        ResumeAllInput();
     }
 
-    private void DisplayMouseUIIfNeeded()
+    public void SetIsUsingMouse(bool isUsingMouse)
     {
-        ControllerLayout.LayoutStyle layout = MenuData.LobbyScreenData.ControllerSetup.LocalTeamLayouts[teamIndex].Layout;
-        // Should the mouse be displayed?
-        if (player != null)
-        {
-            if (player.controllers.hasMouse)
-            {
-                // Is this player a separate layout?
-                if (layout == Menus.ControllerLayout.LayoutStyle.Separate)
-                {
-                    // Using left hand layout for single character?
-                    if (SaveManager.Instance.loadedSave.OptionsMenuData.UseLeftLayoutForSingleCharacter)
-                    {
-                        isUsingMouse = SaveManager.Instance.loadedSave.OptionsMenuData.IsP1UsingMouseMovement;
-                    }
-                    // Using right hand layout for single character?
-                    else if (SaveManager.Instance.loadedSave.OptionsMenuData.UseRightLayoutForSingleCharacter)
-                    {
-                        isUsingMouse = SaveManager.Instance.loadedSave.OptionsMenuData.IsP2UsingMouseMovement;
-                    }
-                }
-                else    // the layout is shared. In this case, only one side can use mouse movement, so we just use that
-                {
-                    isUsingMouse = playerNumber == 1 ? SaveManager.Instance.loadedSave.OptionsMenuData.IsP1UsingMouseMovement : SaveManager.Instance.loadedSave.OptionsMenuData.IsP2UsingMouseMovement;
-                }
-
-                if (isUsingMouse)
-                    Debug.Log("using mouse: player " + PlayerNumber + " of team " + teamIndex);
-            }
-            else
-            {
-                isUsingMouse = false;
-            }
-            if (isUsingMouse && RaceManager.Instance != null)
-            {
-                RaceManager.Instance.RaceUI.UseMouseJoystickUI(true, TeamIndex, playerNumber);
-            }
-            else if (layout == ControllerLayout.LayoutStyle.Shared && (!SaveManager.Instance.loadedSave.OptionsMenuData.IsP1UsingMouseMovement && !SaveManager.Instance.loadedSave.OptionsMenuData.IsP2UsingMouseMovement))            
-            {
-                Debug.Log("no one using mouse movement");
-                // if neither P1 nor P2 are using mouse movement, hide th emouse joystick UI
-                RaceManager.Instance.RaceUI.UseMouseJoystickUI(false, 0, 1);
-            }
-            else if (layout == ControllerLayout.LayoutStyle.Separate)       // if separate layout (this will happen when ONE person is using MnK and the TEAMMATE is using a controller
-            {
-                // check to see if the layout being used is using mouse movement, and if not, hide the mouse UI
-                if ((SaveManager.Instance.loadedSave.OptionsMenuData.UseLeftLayoutForSingleCharacter && !SaveManager.Instance.loadedSave.OptionsMenuData.IsP1UsingMouseMovement)
-                    || (SaveManager.Instance.loadedSave.OptionsMenuData.UseRightLayoutForSingleCharacter && !SaveManager.Instance.loadedSave.OptionsMenuData.IsP2UsingMouseMovement))
-                {
-                    RaceManager.Instance.RaceUI.UseMouseJoystickUI(false, 0, 1);
-                }
-            }
-        }
+        this.isUsingMouse = isUsingMouse;
     }
 
     private void FinishedRace(int teamIndex)
@@ -344,11 +421,54 @@ public class PlayerInput : MonoBehaviourPun
         if (teamIndex == this.teamIndex)
         {
             canSpectate = true;
-            myPlayerSpectate.StartSpectate();
 
-            // HACK for Omegathon
+            RaceManager.Instance.OnTeamFinishedLevel -= FinishedRace;
+            if (player != null)
+            {
+                player.AddInputEventDelegate(OnSpectateInputLeft, UpdateLoopType.Update, InputActionEventType.ButtonJustPressed, "SpectateLeft");
+                player.AddInputEventDelegate(OnSpectateInputRight, UpdateLoopType.Update, InputActionEventType.ButtonJustPressed, "SpectateRight");
+            }
+        }
+    }
+
+    private void TeamRespawned(int teamIndex)
+    {
+        if (TeamIndex == teamIndex)
+        {
+            // this team respawned
+            if (isUsingMouse)
+            {
+                mouseXDelta = 0f;
+                mouseZDelta = 0f;
+            }
+        }
+    }
+
+    public void SetGameplayType(CharacterContent.TeamInstanceType gameplayType)
+    {
+        this.gameplayType = gameplayType;
+
+        if (gameplayType == CharacterContent.TeamInstanceType.Menu)
+        {
+            // unsubscribe as this is handled by TeamSetupInstance
+            PopUpNotification.OnPopUpShown -= PauseAllInput;
+            PopUpNotification.OnPopUpDismissed -= ResumeAllInput;
+        }
+    }
+
+    private void PopupShown()
+    {
+        if (gameplayType == CharacterContent.TeamInstanceType.Gameplay)
+        {
             PauseAllInput();
-            RaceManager.Instance.OnTeamWin -= FinishedRace;
+        }
+    }
+
+    private void PopupDismissed()
+    {
+        if (gameplayType == CharacterContent.TeamInstanceType.Gameplay)
+        {
+            ResumeAllInput();
         }
     }
 
@@ -356,12 +476,18 @@ public class PlayerInput : MonoBehaviourPun
     {
         if (RaceManager.Instance != null)
         {
-            RaceManager.Instance.OnTeamWin -= FinishedRace;
-            RaceManager.Instance.OnRaceCountdownStarted -= OnRaceCountdownStarted;
+            RaceManager.Instance.OnTeamFinishedLevel -= FinishedRace;
+            RaceManager.Instance.OnRaceBegin -= OnRaceBegin;
+            RaceManager.Instance.OnTeamDeath -= TeamRespawned;
         }
-        if (SaveManager.Instance != null)
+
+        PopUpNotification.OnPopUpShown -= PopupShown;
+        PopUpNotification.OnPopUpDismissed -= PopupDismissed;
+
+        if (player != null)
         {
-            SaveManager.Instance.OnMouseAndKeyboardButtonsChanged -= DisplayMouseUIIfNeeded;
+            player.RemoveInputEventDelegate(OnSpectateInputLeft);
+            player.RemoveInputEventDelegate(OnSpectateInputRight);
         }
     }
 }
