@@ -32,4 +32,4 @@ Script files from the game I'm currently working on, Fling to the Finish: [Steam
 ## Unity Tools
 - [FlingMenu](UnityTools/FlingMenu.cs): A collection of helper functions that appear as a toolbar to automate and make certain things easier when working on the game.
 
-* - A few small portions of the scripts were worked on by my teammates.
+\* - A few small portions of the scripts were worked on by my teammates.
