@@ -30,4 +30,4 @@ Script files from the game I'm currently working on, Fling to the Finish: [Steam
 - [FollowSpline](FollowSpline.cs): A generic script that takes makes an object follow a given spline using one of multiple methods. Has different options for syncing the movement of the object over the network.
 
 ## Unity Tools
-- [FlingMenu](FlingMenu.cs): A collection of helper functions that appear as a toolbar to automate and make certain things easier when working on the game.
+- [FlingMenu](UnityTools/FlingMenu.cs): A collection of helper functions that appear as a toolbar to automate and make certain things easier when working on the game.
