@@ -21,13 +21,15 @@ Script files from the game I'm currently working on, Fling to the Finish: [Steam
 ## General Systems & Architecture
 - [MetaManager](MetaManager.cs): The overarching game manager script. Handles systems required by all scenes, such as level loading.
 - [RaceManager](RaceManager.cs): Manages all aspects of a race. Exists only in playable scenes (not menus). Handles things such as starting the race, keeping track of player checkpoints and respawning, winning, etc.
-- [RaceUIManager](RaceUIManager.cs): Manages the HUD, pre-race and post-race UI of the game. Responds to race events fired by RaceManager.cs.
+- [RaceUIManager](RaceUIManager.cs)*: Manages the HUD, pre-race and post-race UI of the game. Responds to race events fired by RaceManager.cs.
 
 ## Gameplay and physics (offline & network synced)
-- [PlayerInput](PlayerInput.cs): Responsible for reading input from the player and passing it to PlayerMovement.cs and RopeManager.cs. Each player in the team has their own PlayerInput.cs script.
-- [PlayerMovement](PlayerMovement.cs): Responsible for handling player gameplay after receiving input from PlayerInput.cs. Each player in the team has their own PlayerMovement.cs script.
-- [RopeManager](RopeManager.cs): Responsible for common gameplay of the rope that is shared by two players. Each team has one RopeManager.cs script that takes input from both its PlayerInput.cs scripts.
+- [PlayerInput](PlayerInput.cs)*: Responsible for reading input from the player and passing it to PlayerMovement.cs and RopeManager.cs. Each player in the team has their own PlayerInput.cs script.
+- [PlayerMovement](PlayerMovement.cs)*: Responsible for handling player gameplay after receiving input from PlayerInput.cs. Each player in the team has their own PlayerMovement.cs script.
+- [RopeManager](RopeManager.cs)*: Responsible for common gameplay of the rope that is shared by two players. Each team has one RopeManager.cs script that takes input from both its PlayerInput.cs scripts.
 - [FollowSpline](FollowSpline.cs): A generic script that takes makes an object follow a given spline using one of multiple methods. Has different options for syncing the movement of the object over the network.
 
 ## Unity Tools
 - [FlingMenu](UnityTools/FlingMenu.cs): A collection of helper functions that appear as a toolbar to automate and make certain things easier when working on the game.
+
+* - A few small portions of the scripts were worked on by my teammates.
