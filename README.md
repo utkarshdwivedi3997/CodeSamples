@@ -1,5 +1,7 @@
 Code samples from past and present projects I have worked / am working on.
 
+**Note** For C++ code samples, please reach out to me for access to private repositories. Due to course policies I'm unable to make my C++ work public.
+
 - [Fling to the Finish](Fling%20to%20the%20Finish%20(Current%20Project)): The game I'm currently working on. Launched in Steam Early access with **400k+ players so far**.
 
 - [A True Ace in Space](_%20A%20True%20Ace%20in%20Space): Unreal Engine 4 Group Project
